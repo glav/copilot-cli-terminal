@@ -6,6 +6,13 @@ class TmuxError(RuntimeError):
     pass
 
 
+def _tmux_install_hint() -> str:
+    return (
+        "Install tmux and retry. On Debian/Ubuntu: "
+        "sudo apt-get update && sudo apt-get install -y tmux"
+    )
+
+
 def _run_tmux(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     cmd = ["tmux", *args]
     try:
@@ -17,13 +24,16 @@ def _run_tmux(args: list[str], *, cwd: Path | None = None) -> subprocess.Complet
             check=False,
         )
     except FileNotFoundError as e:
-        raise TmuxError("tmux not found on PATH") from e
+        raise TmuxError(f"tmux not found on PATH. {_tmux_install_hint()}") from e
 
 
 def ensure_tmux_available() -> None:
     result = _run_tmux(["-V"])
     if result.returncode != 0:
-        raise TmuxError(result.stderr.strip() or "tmux is not available")
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        details = stderr or stdout or "tmux is not available"
+        raise TmuxError(f"{details}. {_tmux_install_hint()}")
 
 
 def has_session(session_name: str) -> bool:
@@ -37,28 +47,68 @@ def kill_session(session_name: str) -> None:
         raise TmuxError(result.stderr.strip() or "Failed to kill tmux session")
 
 
-def start_2x2_session(*, session_name: str, cwd: Path) -> None:
+def start_2x2_session(*, session_name: str, cwd: Path) -> list[str]:
     if has_session(session_name):
         raise TmuxError(f"tmux session already exists: {session_name}")
 
-    result = _run_tmux(["new-session", "-d", "-s", session_name], cwd=cwd)
+    result = _run_tmux(["new-session", "-d", "-s", session_name, "-c", str(cwd)], cwd=cwd)
     if result.returncode != 0:
         raise TmuxError(result.stderr.strip() or "Failed to create tmux session")
 
-    # Pane 0 exists by default.
-    steps: list[list[str]] = [
-        ["split-window", "-h", "-t", f"{session_name}:0.0"],
-        ["select-pane", "-t", f"{session_name}:0.0"],
-        ["split-window", "-v", "-t", f"{session_name}:0.0"],
-        ["select-pane", "-t", f"{session_name}:0.2"],
-        ["split-window", "-v", "-t", f"{session_name}:0.2"],
-        ["select-layout", "-t", f"{session_name}:0", "tiled"],
-    ]
+    # Pane 0 exists by default; capture its pane_id and use pane_id targeting thereafter.
+    p0_res = _run_tmux(
+        ["display-message", "-p", "-t", f"{session_name}:0.0", "#{pane_id}"],
+        cwd=cwd,
+    )
+    if p0_res.returncode != 0:
+        raise TmuxError(p0_res.stderr.strip() or "Failed to resolve tmux pane_id")
+    p0 = p0_res.stdout.strip()
+    if not p0:
+        raise TmuxError("Failed to resolve tmux pane_id (empty output)")
 
-    for args in steps:
-        r = _run_tmux(args, cwd=cwd)
+    def _split(*, direction_args: list[str], target: str) -> str:
+        r = _run_tmux(
+            [
+                "split-window",
+                *direction_args,
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-t",
+                target,
+            ],
+            cwd=cwd,
+        )
         if r.returncode != 0:
-            raise TmuxError(r.stderr.strip() or f"tmux failed: {' '.join(args)}")
+            raise TmuxError(r.stderr.strip() or "Failed to split tmux pane")
+        pane_id = r.stdout.strip()
+        if not pane_id:
+            raise TmuxError("Failed to split tmux pane (empty pane_id output)")
+        return pane_id
+
+    p1 = _split(direction_args=["-h"], target=p0)
+    p2 = _split(direction_args=["-v"], target=p0)
+    p3 = _split(direction_args=["-v"], target=p1)
+
+    layout_res = _run_tmux(["select-layout", "-t", f"{session_name}:0", "tiled"], cwd=cwd)
+    if layout_res.returncode != 0:
+        raise TmuxError(layout_res.stderr.strip() or "Failed to set tmux layout")
+
+    border_status_res = _run_tmux(
+        ["set-option", "-t", session_name, "-g", "pane-border-status", "top"],
+        cwd=cwd,
+    )
+    if border_status_res.returncode != 0:
+        raise TmuxError(border_status_res.stderr.strip() or "Failed to enable tmux pane titles")
+
+    border_format_res = _run_tmux(
+        ["set-option", "-t", session_name, "-g", "pane-border-format", "#{pane_title}"],
+        cwd=cwd,
+    )
+    if border_format_res.returncode != 0:
+        raise TmuxError(border_format_res.stderr.strip() or "Failed to set tmux pane title format")
+
+    return [p0, p1, p2, p3]
 
 
 def set_pane_title(*, target: str, title: str) -> None:
@@ -67,11 +117,27 @@ def set_pane_title(*, target: str, title: str) -> None:
         raise TmuxError(r.stderr.strip() or "Failed to set pane title")
 
 
-def send_keys(*, target: str, command: str) -> None:
-    # Use `send-keys` with a single shell command; tmux will type it into the pane.
-    r = _run_tmux(["send-keys", "-t", target, command, "Enter"])
+def focus_pane(*, target: str) -> None:
+    r = _run_tmux(["select-pane", "-t", target])
     if r.returncode != 0:
-        raise TmuxError(r.stderr.strip() or "Failed to send keys")
+        raise TmuxError(r.stderr.strip() or "Failed to focus tmux pane")
+
+
+def send_keys(*, target: str, command: str) -> None:
+    # Send the command as literal text, then press Enter.
+    #
+    # We've seen tmux occasionally misparse a combined invocation and error with
+    # "unknown command: Enter". Splitting into two calls is more robust.
+    cmd = command or ""
+
+    if cmd:
+        r1 = _run_tmux(["send-keys", "-t", target, "-l", cmd])
+        if r1.returncode != 0:
+            raise TmuxError(r1.stderr.strip() or "Failed to send keys")
+
+    r2 = _run_tmux(["send-keys", "-t", target, "C-m"])
+    if r2.returncode != 0:
+        raise TmuxError(r2.stderr.strip() or "Failed to send keys")
 
 
 def attach(session_name: str) -> None:

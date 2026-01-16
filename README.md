@@ -39,15 +39,47 @@ uv run python src/app.py
 
 This repo includes an MVP terminal tool that launches a 4-persona workflow using `tmux` panes (Linux-only).
 
+This tool orchestrates panes and shared context files; it does not replace the underlying GitHub Copilot CLI.
+
+Not AWS Copilot: this project targets **GitHub Copilot CLI** (the standalone `copilot` command), not the AWS “copilot” CLI.
+
 ### Prereqs
 
 - `tmux` installed and available on `PATH`
-- `copilot` CLI installed and authenticated
+- GitHub Copilot CLI (`copilot`) installed and authenticated
+
+Debian/Ubuntu (including many devcontainers):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tmux
+```
+
+### Install GitHub Copilot CLI
+
+GitHub Copilot CLI is currently distributed via multiple methods (choose one):
+
+- WinGet (Windows)
+- Homebrew (macOS and Linux)
+- npm (all platforms, requires Node.js 22+)
+- Install script (macOS and Linux)
+
+### Authenticate
+
+On first launch of `copilot`, you’ll be prompted to log in using the `/login` slash command.
+
+For non-interactive/auth automation, you can also use a fine-grained PAT with the “Copilot Requests” permission via `GH_TOKEN` or `GITHUB_TOKEN`.
 
 ### Run
 
 ```bash
-uv run copilot-multi start --attach
+uv run copilot-multi start
+```
+
+To start the session in the background (no attach):
+
+```bash
+uv run copilot-multi start --detach
 ```
 
 This creates/uses `.copilot-multi/` for shared context and a session state file at `.copilot-multi/session.json`.
@@ -57,7 +89,7 @@ This creates/uses `.copilot-multi/` for shared context and a session state file 
 ```bash
 uv run copilot-multi status
 uv run copilot-multi set-status pm working --message "Drafting scope + acceptance"
-uv run copilot-multi wait --persona impl --status done --timeout 1800
+uv run copilot-multi wait impl --status done --timeout 1800
 uv run copilot-multi stop
 ```
 

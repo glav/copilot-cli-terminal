@@ -20,11 +20,15 @@ from copilot_multi.tmux import (
     TmuxError,
     attach,
     ensure_tmux_available,
+    focus_pane,
+    has_session,
     kill_session,
     send_keys,
     set_pane_title,
     start_2x2_session,
 )
+
+CURRENT_SESSION_VERSION = 2
 
 
 def _repo_root_from_cwd() -> Path:
@@ -81,7 +85,7 @@ def _ensure_shared_files(shared_dir: Path) -> list[Path]:
 
 def _init_session_state(repo_root: Path) -> dict:
     return {
-        "version": 1,
+        "version": CURRENT_SESSION_VERSION,
         "sessionName": TMUX_SESSION_NAME,
         "repoRoot": str(repo_root),
         "createdAt": utc_now_iso(),
@@ -91,10 +95,55 @@ def _init_session_state(repo_root: Path) -> dict:
                 "status": "idle",
                 "updatedAt": utc_now_iso(),
                 "message": "",
+                "paneId": "",
             }
             for key, display in PERSONAS.items()
         },
     }
+
+
+def _normalize_session_state(repo_root: Path, data: dict | None) -> dict:
+    if not isinstance(data, dict) or not data:
+        return _init_session_state(repo_root)
+
+    version = data.get("version")
+    try:
+        version_int = int(version)
+    except (TypeError, ValueError):
+        version_int = 1
+
+    normalized = {
+        "version": version_int,
+        "sessionName": TMUX_SESSION_NAME,
+        "repoRoot": str(repo_root),
+        "createdAt": data.get("createdAt") or utc_now_iso(),
+        "personas": {},
+    }
+
+    personas = data.get("personas")
+    if not isinstance(personas, dict):
+        personas = {}
+
+    for key, display in PERSONAS.items():
+        existing = personas.get(key)
+        if not isinstance(existing, dict):
+            existing = {}
+
+        status = existing.get("status")
+        if status not in ALLOWED_STATUSES:
+            status = "idle"
+
+        normalized["personas"][key] = {
+            "displayName": existing.get("displayName") or display,
+            "status": status,
+            "updatedAt": existing.get("updatedAt") or utc_now_iso(),
+            "message": existing.get("message") or "",
+            "paneId": existing.get("paneId") or "",
+        }
+
+    # Simple migration strategy: bump to CURRENT_SESSION_VERSION after normalization.
+    normalized["version"] = CURRENT_SESSION_VERSION
+    return normalized
 
 
 def _write_session_state_if_missing(session_path: Path, state: dict) -> None:
@@ -102,8 +151,11 @@ def _write_session_state_if_missing(session_path: Path, state: dict) -> None:
     try:
         existing = locked.read_json()
         if existing:
+            normalized = _normalize_session_state(_repo_root_from_cwd(), existing)
+            if normalized != existing:
+                locked.write_json(normalized)
             return
-        locked.write_json(state)
+        locked.write_json(_normalize_session_state(_repo_root_from_cwd(), state))
     finally:
         unlock_session_file(locked)
 
@@ -113,26 +165,60 @@ def cmd_start(args: argparse.Namespace) -> int:
     shared_dir = _shared_dir(repo_root)
     session_path = _session_path(repo_root)
 
-    if shutil.which("tmux") is None:
-        raise SystemExit("tmux is required for MVP (Linux-only). Install tmux and retry.")
+    if shutil.which("copilot") is None:
+        raise SystemExit(
+            "GitHub Copilot CLI ('copilot') is required. Install/authenticate it and retry. "
+            "See README for install and login guidance."
+        )
 
     ensure_tmux_available()
     _ensure_shared_files(shared_dir)
 
+    # If the session already exists, treat `start` as idempotent: attach (default)
+    # or no-op when explicitly detached.
+    if has_session(TMUX_SESSION_NAME):
+        if getattr(args, "detach", False):
+            print(
+                f"tmux session '{TMUX_SESSION_NAME}' is already running. "
+                f"Attach with: tmux attach -t {TMUX_SESSION_NAME}"
+            )
+            return 0
+
+        # Best-effort: focus the PM pane before attaching.
+        pm_target = f"{TMUX_SESSION_NAME}:0.0"
+        locked = lock_session_file(session_path)
+        try:
+            data = _normalize_session_state(repo_root, locked.read_json())
+            maybe = data.get("personas", {}).get("pm", {}).get("paneId")
+            if isinstance(maybe, str) and maybe:
+                pm_target = maybe
+        finally:
+            unlock_session_file(locked)
+
+        focus_pane(target=pm_target)
+        attach(TMUX_SESSION_NAME)
+        return 0
+
     state = _init_session_state(repo_root)
     _write_session_state_if_missing(session_path, state)
 
-    start_2x2_session(session_name=TMUX_SESSION_NAME, cwd=repo_root)
+    pane_ids = start_2x2_session(session_name=TMUX_SESSION_NAME, cwd=repo_root)
 
-    pane_targets = [
-        f"{TMUX_SESSION_NAME}:0.0",
-        f"{TMUX_SESSION_NAME}:0.1",
-        f"{TMUX_SESSION_NAME}:0.2",
-        f"{TMUX_SESSION_NAME}:0.3",
-    ]
     persona_keys = ["pm", "impl", "review", "docs"]
+    pane_targets_by_persona = dict(zip(persona_keys, pane_ids, strict=True))
 
-    for target, persona_key in zip(pane_targets, persona_keys, strict=True):
+    locked = lock_session_file(session_path)
+    try:
+        data = _normalize_session_state(repo_root, locked.read_json() or state)
+        for persona_key, pane_id in pane_targets_by_persona.items():
+            persona_data = data["personas"].setdefault(persona_key, {})
+            persona_data.setdefault("displayName", PERSONAS[persona_key])
+            persona_data["paneId"] = pane_id
+        locked.write_json(data)
+    finally:
+        unlock_session_file(locked)
+
+    for persona_key, target in pane_targets_by_persona.items():
         display = PERSONAS[persona_key]
         set_pane_title(target=target, title=display)
         send_keys(target=target, command=f"export COPILOT_MULTI_PERSONA={persona_key}")
@@ -149,13 +235,17 @@ def cmd_start(args: argparse.Namespace) -> int:
             ),
         )
 
-    if args.attach:
-        attach(TMUX_SESSION_NAME)
-    else:
+    # Ensure PM is the active pane when the user attaches.
+    focus_pane(target=pane_targets_by_persona["pm"])
+
+    if getattr(args, "detach", False):
         print(
             f"Started tmux session '{TMUX_SESSION_NAME}'. "
             f"Attach with: tmux attach -t {TMUX_SESSION_NAME}"
         )
+        return 0
+
+    attach(TMUX_SESSION_NAME)
     return 0
 
 
@@ -163,12 +253,12 @@ def cmd_status(_: argparse.Namespace) -> int:
     repo_root = _repo_root_from_cwd()
     session_path = _session_path(repo_root)
 
-    if not session_path.exists():
-        raise SystemExit("No session state found. Run: copilot-multi start")
-
     locked = lock_session_file(session_path)
     try:
-        data = locked.read_json()
+        existing = locked.read_json()
+        data = _normalize_session_state(repo_root, existing)
+        if data != existing:
+            locked.write_json(data)
     finally:
         unlock_session_file(locked)
 
@@ -192,9 +282,7 @@ def cmd_set_status(args: argparse.Namespace) -> int:
 
     locked = lock_session_file(session_path)
     try:
-        data = locked.read_json() or _init_session_state(repo_root)
-        data.setdefault("personas", {})
-        data["personas"].setdefault(persona, {"displayName": PERSONAS[persona]})
+        data = _normalize_session_state(repo_root, locked.read_json())
         data["personas"][persona]["status"] = status
         data["personas"][persona]["updatedAt"] = utc_now_iso()
         if args.message is not None:
@@ -251,7 +339,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_start = sub.add_parser("start", help="Start a 4-pane tmux session")
-    p_start.add_argument("--attach", action="store_true", help="Attach immediately")
+    # Default UX: attach immediately.
+    # Keep --attach for backward compatibility (it is effectively a no-op now).
+    p_start.add_argument("--detach", action="store_true", help="Start but do not attach")
+    p_start.add_argument("--attach", action="store_true", help=argparse.SUPPRESS)
     p_start.set_defaults(func=cmd_start)
 
     p_status = sub.add_parser("status", help="Show persona statuses")

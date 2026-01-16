@@ -17,7 +17,9 @@ Unresolved Critical Questions: 0 | TBDs: 8
 
 ## 1. Executive Summary
 ### Context
-We want a small CLI tool that wraps the existing `copilot` CLI command and launches a coordinated, multi-persona workflow.
+We want a small CLI tool that wraps **GitHub Copilot CLI** (the standalone `copilot` command) and launches a coordinated, multi-persona workflow.
+
+Not AWS Copilot: this feature targets GitHub Copilot CLI, not the AWS “copilot” CLI.
 
 The tool should open 4 visible terminal panes (via `tmux`) in a shared working directory. Each pane represents a dedicated persona:
 1) Project Manager
@@ -82,13 +84,14 @@ A typical journey:
 * A shared “session state” file at `.copilot-multi/session.json` that personas can read/write to coordinate.
 * A shared set of working files (e.g., plan, decisions, handoff notes).
 * Session lifecycle commands: start, status, stop, resume (at least start/status/stop for MVP).
-* Underlying Copilot CLI command defaults to `copilot` (optionally configurable later).
+* Underlying Copilot CLI command defaults to GitHub Copilot CLI: `copilot` (optionally configurable later).
 
 ### Out of Scope (justify if empty)
 * Implementing or modifying the Copilot model/service itself.
 * Building a VS Code extension (this is a terminal-first tool).
 * Cross-machine collaboration (single-machine session only for MVP).
 * Windows support (MVP is Linux-only).
+* Supporting deprecated `gh-copilot` / `gh copilot` backends.
 
 ### Assumptions
 * The underlying Copilot CLI is already installed and authenticated on the machine.
@@ -111,7 +114,7 @@ Terminal UI only.
 
 Expected interaction:
 - User runs `copilot-multi start`.
-- Tool opens a 2x2 layout (4 panes or 4 windows), each labeled with persona.
+- Tool opens and attaches to a 2x2 layout (4 panes), each labeled with persona.
 - Each pane runs the persona wrapper command and can query/update session status.
 
 UX Status: Proposed
@@ -179,7 +182,7 @@ copilot-multi
 ## 9. Dependencies
 | Dependency | Type | Criticality | Owner | Risk | Mitigation |
 |-----------|------|------------|-------|------|-----------|
-| `copilot` CLI | Runtime | Critical | User | Not installed / auth issues | Pre-flight check + clear error |
+| GitHub Copilot CLI (`copilot`) | Runtime | Critical | User | Not installed / auth issues | Pre-flight check + clear error |
 | `tmux` | Runtime | Critical | Tool | Not present in environment | Install guidance + actionable error message |
 | Python runtime + packaging tooling | Build | High | Repo | Packaging friction | Use existing repo Python setup |
 
