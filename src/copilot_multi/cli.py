@@ -185,6 +185,7 @@ def _copilot_auth_smoke_test(*, copilot_config_dir: Path, repo_root: Path) -> bo
     copilot_config_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         "copilot",
+        "--allow-all",
         "--config-dir",
         str(copilot_config_dir),
         "--add-dir",
@@ -298,6 +299,7 @@ def _ensure_copilot_authenticated(*, copilot_config_dir: Path, repo_root: Path) 
     proc = subprocess.run(
         [
             "copilot",
+            "--allow-all",
             "--config-dir",
             str(copilot_config_dir),
             "--add-dir",

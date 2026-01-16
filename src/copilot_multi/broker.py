@@ -108,6 +108,7 @@ def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock)
     with lock:
         cmd = [
             "copilot",
+            "--allow-all",
             "--config-dir",
             str(cfg.copilot_config_dir),
             "--add-dir",
@@ -145,6 +146,7 @@ def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock)
 
                 retry_cmd = [
                     "copilot",
+                    "--allow-all",
                     "--config-dir",
                     str(cfg.copilot_config_dir),
                     "--add-dir",
