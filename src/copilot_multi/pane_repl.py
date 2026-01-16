@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import atexit
+
 from copilot_multi.constants import (
     DEFAULT_SESSION_FILE_NAME,
     DEFAULT_SHARED_DIR_NAME,
@@ -50,6 +52,49 @@ def _run_local_command(command_line: str) -> int:
 
 def _session_path(repo_root: Path) -> Path:
     return repo_root / DEFAULT_SHARED_DIR_NAME / DEFAULT_SESSION_FILE_NAME
+
+
+def _history_path(*, repo_root: Path, persona: str) -> Path:
+    return repo_root / DEFAULT_SHARED_DIR_NAME / "history" / f"{persona}.txt"
+
+
+def _setup_readline_history(*, repo_root: Path, persona: str) -> None:
+    """Best-effort shell-like history (up/down arrows) for `input()`.
+
+    Works when Python has the `readline` module available (common on Linux).
+    """
+
+    try:
+        import readline  # type: ignore
+    except Exception:
+        return
+
+    history_path = _history_path(repo_root=repo_root, persona=persona)
+    try:
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    try:
+        readline.read_history_file(str(history_path))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Non-fatal: history just won't persist.
+        pass
+
+    try:
+        readline.set_history_length(2000)
+    except Exception:
+        pass
+
+    def _save_history() -> None:
+        try:
+            readline.write_history_file(str(history_path))
+        except OSError:
+            pass
+
+    atexit.register(_save_history)
 
 
 def _set_persona_status(*, repo_root: Path, persona: str, status: str) -> None:
@@ -114,8 +159,161 @@ def _translate_coordination_alias(argv: list[str]) -> list[str] | None:
     return ["copilot-multi", subcmd, *rest]
 
 
+def _translate_gt_shortcut(line: str) -> list[str] | None:
+    """Translate a leading '>' shortcut line into a local argv.
+
+    Examples:
+    - >status                      => copilot-multi status
+    - >set-status pm working       => copilot-multi set-status pm working
+    - >wait pm --status done       => copilot-multi wait pm --status done
+    - >waitfor pm                  => copilot-multi wait pm --status idle
+    """
+
+    raw = (line or "").lstrip()
+    if not raw.startswith(">"):
+        return None
+
+    tail = raw[1:].strip()
+    if not tail:
+        return ["copilot-multi"]
+
+    try:
+        argv = shlex.split(tail)
+    except ValueError as e:
+        print(f"Parse error: {e}", file=sys.stderr)
+        return []
+
+    if not argv:
+        return ["copilot-multi"]
+
+    head = argv[0]
+    if head in {"waitfor", "wait-for"}:
+        persona = argv[1] if len(argv) > 1 else ""
+        rest = argv[2:]
+        return ["copilot-multi", "wait", persona, "--status", "idle", *rest]
+
+    return ["copilot-multi", *argv]
+
+
+def _split_then(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Split an argv list on `--` into (head, tail).
+
+    Example:
+      ["copilot-multi","wait","pm","--status","idle","--","explain","x"]
+        -> (["copilot-multi","wait","pm","--status","idle"], ["explain","x"])
+    """
+
+    if "--" not in argv:
+        return argv, []
+    idx = argv.index("--")
+    return argv[:idx], argv[idx + 1 :]
+
+
+def _tokens_to_line(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+    try:
+        return shlex.join(tokens)
+    except Exception:
+        return " ".join(tokens)
+
+
+def _run_followup_after_wait(
+    *,
+    follow_tokens: list[str],
+    persona: str,
+    socket_path: Path,
+    repo_root: Path,
+) -> None:
+    """Run a follow-up after a local wait completes.
+
+    The follow-up can be:
+    - another local shortcut (starts with '>')
+    - a local coordination command (copilot-multi/copilot-wait/etc)
+    - otherwise treated as a Copilot prompt line
+    """
+
+    follow_line = _tokens_to_line(follow_tokens).strip()
+    if not follow_line:
+        return
+
+    if follow_line.startswith(">"):
+        gt = _translate_gt_shortcut(follow_line)
+        if not gt or gt == []:
+            return
+        try:
+            rendered = shlex.join(gt)
+        except Exception:
+            rendered = " ".join(gt)
+        print(f"(local) {rendered}")
+        subprocess.run(gt, text=True)
+        return
+
+    if (
+        follow_line.startswith("copilot-multi ")
+        or follow_line == "copilot-multi"
+        or follow_line.startswith("copilot-wait")
+        or follow_line.startswith("copilot-status")
+        or follow_line.startswith("copilot-set-status")
+    ):
+        try:
+            argv = shlex.split(follow_line)
+        except ValueError as e:
+            print(f"Parse error: {e}", file=sys.stderr)
+            return
+
+        translated = _translate_coordination_alias(argv)
+        if translated is not None:
+            argv = translated
+
+        try:
+            rendered = shlex.join(argv)
+        except Exception:
+            rendered = " ".join(argv)
+        print(f"(local) {rendered}")
+        subprocess.run(argv, text=True)
+        return
+
+    # Default: treat as a Copilot prompt line.
+    try:
+        _set_persona_status(repo_root=repo_root, persona=persona, status="working")
+    except OSError:
+        pass
+
+    try:
+        resp = _connect_and_send(
+            socket_path=socket_path,
+            payload={"kind": "prompt", "prompt": f"[{persona}] {follow_line}"},
+        )
+    except OSError as e:
+        print(f"Broker error: {e}", file=sys.stderr)
+        print(f"Expected socket at: {socket_path}", file=sys.stderr)
+        return
+    except json.JSONDecodeError:
+        print("Broker returned invalid JSON", file=sys.stderr)
+        return
+    finally:
+        try:
+            _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
+        except OSError:
+            pass
+
+    if not resp.get("ok"):
+        print(f"Broker error: {resp.get('error')}", file=sys.stderr)
+        return
+
+    output = resp.get("output") or ""
+    if output:
+        sys.stdout.write(output)
+        if not output.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
 def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     os.chdir(repo_root)
+
+    _setup_readline_history(repo_root=repo_root, persona=persona)
 
     prompt_prefix = f"{persona}> "
 
@@ -128,6 +326,9 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     print("Type anything to send to Copilot CLI.")
     print("Commands starting with 'copilot-multi ' run locally.")
     print("Shortcuts: copilot-wait/copilot-status/copilot-set-status run locally.")
+    print("Shortcuts: '>...' runs 'copilot-multi ...' locally (e.g. >status, >waitfor pm).")
+    print("Tip: chain after waits with: >waitfor pm -- <prompt or command>")
+    print("Tip: use Up/Down arrows for history.")
     print("Type 'exit' to close this pane.")
     print()
 
@@ -147,6 +348,46 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
         if line in {"exit", "quit"}:
             return 0
 
+        gt = _translate_gt_shortcut(line)
+        if gt is not None:
+            if gt == []:
+                continue
+            argv, then_tokens = _split_then(gt)
+
+            # Make it obvious this is a local command (not a Copilot prompt).
+            try:
+                rendered = shlex.join(argv)
+            except Exception:
+                rendered = " ".join(argv)
+            print(f"(local) {rendered}")
+
+            subcmd = argv[1] if len(argv) > 1 else ""
+            if subcmd == "wait":
+                try:
+                    _set_persona_status(repo_root=repo_root, persona=persona, status="waiting")
+                except OSError:
+                    pass
+                try:
+                    proc = subprocess.run(argv, text=True)
+                    _ = proc.returncode
+                finally:
+                    try:
+                        _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
+                    except OSError:
+                        pass
+
+                _run_followup_after_wait(
+                    follow_tokens=then_tokens,
+                    persona=persona,
+                    socket_path=socket_path,
+                    repo_root=repo_root,
+                )
+                continue
+
+            proc = subprocess.run(argv, text=True)
+            _ = proc.returncode
+            continue
+
         if (
             line.startswith("copilot-multi ")
             or line == "copilot-multi"
@@ -164,6 +405,14 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             if translated is not None:
                 argv = translated
 
+            argv, then_tokens = _split_then(argv)
+
+            try:
+                rendered = shlex.join(argv)
+            except Exception:
+                rendered = " ".join(argv)
+            print(f"(local) {rendered}")
+
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
                 try:
@@ -178,6 +427,13 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                         _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
                     except OSError:
                         pass
+
+                _run_followup_after_wait(
+                    follow_tokens=then_tokens,
+                    persona=persona,
+                    socket_path=socket_path,
+                    repo_root=repo_root,
+                )
                 continue
 
             proc = subprocess.run(argv, text=True)
