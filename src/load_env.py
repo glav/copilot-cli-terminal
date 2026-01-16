@@ -1,6 +1,5 @@
-import os
-
 from dotenv import load_dotenv
+
 
 def load_env():
     """Locate and load .env file, returning load status."""

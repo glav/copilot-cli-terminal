@@ -64,10 +64,8 @@ Notes about `.env` discovery:
 - All Copilot and AI assisted workflows exist in the .agent directory
 - If the user asks about workflows, prompts or other AI assisted ways of working, describe the use and structure of the .agent directory and purpose.
 
-### Source code
+### Source code - MUST
 - Any source code should be added to the `src/` directory, for example python files.
-- The working directory for any context file, specification files, implementation plans, research files or other working or markup files should be in the .agent-context directory.
-  - If .agent-context directory does not exist, create it.
 
 ### Add new scripts
 

@@ -35,6 +35,32 @@ uv sync
 uv run python src/app.py
 ```
 
+## Copilot multi-persona CLI (MVP)
+
+This repo includes an MVP terminal tool that launches a 4-persona workflow using `tmux` panes (Linux-only).
+
+### Prereqs
+
+- `tmux` installed and available on `PATH`
+- `copilot` CLI installed and authenticated
+
+### Run
+
+```bash
+uv run copilot-multi start --attach
+```
+
+This creates/uses `.copilot-multi/` for shared context and a session state file at `.copilot-multi/session.json`.
+
+### Coordination
+
+```bash
+uv run copilot-multi status
+uv run copilot-multi set-status pm working --message "Drafting scope + acceptance"
+uv run copilot-multi wait --persona impl --status done --timeout 1800
+uv run copilot-multi stop
+```
+
 ## Linting and formatting
 
 This template includes `ruff`.
