@@ -29,10 +29,9 @@ def _ensure_dir(path: Path) -> None:
 
 def _copilot_env(config_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
-    # Keep Copilot CLI state/config shared and repo-local.
-    # Copilot CLI honors XDG_CONFIG_HOME/XDG_STATE_HOME, defaulting to ~/.copilot.
-    env["XDG_CONFIG_HOME"] = str(config_dir)
-    env["XDG_STATE_HOME"] = str(config_dir)
+    # Rely on `copilot --config-dir ...` to select the active Copilot directory.
+    # Overriding XDG_* can cause Copilot CLI to look in a different location and
+    # appear unauthenticated even when the config dir is valid.
     return env
 
 
@@ -43,6 +42,8 @@ def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock)
             "copilot",
             "--config-dir",
             str(cfg.copilot_config_dir),
+            "--add-dir",
+            str(cfg.repo_root),
             "-p",
             prompt,
         ]
@@ -78,6 +79,8 @@ def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock)
                     "copilot",
                     "--config-dir",
                     str(cfg.copilot_config_dir),
+                    "--add-dir",
+                    str(cfg.repo_root),
                     "-p",
                     prompt,
                 ]
@@ -124,6 +127,17 @@ class _UnixJSONLineHandler(socketserver.StreamRequestHandler):
         kind = req.get("kind")
         if kind == "ping":
             self._write_json({"ok": True, "kind": "pong"})
+            return
+
+        if kind == "info":
+            self._write_json(
+                {
+                    "ok": True,
+                    "kind": "info",
+                    "repoRoot": str(self.broker_cfg.repo_root),
+                    "copilotConfigDir": str(self.broker_cfg.copilot_config_dir),
+                }
+            )
             return
 
         if kind != "prompt":

@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -48,6 +49,32 @@ def _copilot_shared_dir(repo_root: Path) -> Path:
     return _shared_dir(repo_root) / "copilot"
 
 
+def _default_copilot_config_dir() -> Path:
+    # Copilot CLI defaults to $HOME/.copilot when XDG_* are not set.
+    # We use this to detect and reuse an existing authenticated session.
+    return Path.home() / ".copilot"
+
+
+def _copilot_config_dir_marker_path(repo_root: Path) -> Path:
+    return _shared_dir(repo_root) / "copilot-config-dir.txt"
+
+
+def _copilot_auth_marker_path(repo_root: Path) -> Path:
+    return _shared_dir(repo_root) / "copilot-authenticated.txt"
+
+
+def _copilot_env_for_dir(copilot_config_dir: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    # Rely on `copilot --config-dir ...` to select the active Copilot directory.
+    # Overriding XDG_* can cause Copilot CLI to look in a different location and
+    # appear unauthenticated even when the config dir is valid.
+    return env
+
+
+def _looks_like_no_auth_error(text: str) -> bool:
+    return "no authentication information found" in (text or "").lower()
+
+
 def _copilot_session_marker_path(repo_root: Path) -> Path:
     return _shared_dir(repo_root) / "copilot.session"
 
@@ -66,18 +93,264 @@ def _is_broker_responsive(socket_path: Path, timeout_seconds: float = 0.2) -> bo
         return False
 
 
-def _start_broker(repo_root: Path) -> None:
+def _broker_info(socket_path: Path, timeout_seconds: float = 0.3) -> dict | None:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout_seconds)
+            s.connect(str(socket_path))
+            s.sendall(b'{"kind":"info"}\n')
+            raw = s.recv(8192)
+    except OSError:
+        return None
+
+    try:
+        line = raw.split(b"\n", 1)[0]
+        return json.loads(line.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _has_copilot_token_env() -> bool:
+    # Copilot CLI supports these env vars (in precedence order):
+    # COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN.
+    return bool(
+        os.environ.get("COPILOT_GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+    )
+
+
+def _has_gh_auth(repo_root: Path) -> bool:
+    if shutil.which("gh") is None:
+        return False
+    proc = subprocess.run(
+        ["gh", "auth", "status"],
+        cwd=str(repo_root),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _copilot_config_dir_looks_authenticated(copilot_config_dir: Path) -> bool:
+    # Heuristic: Copilot stores auth material in its config dir.
+    # Avoid reading any secrets; only check for presence of likely auth files.
+    if not copilot_config_dir.exists() or not copilot_config_dir.is_dir():
+        return False
+
+    likely_names = {
+        "auth.json",
+        "oauth.json",
+        "oauth-token.json",
+        "credentials.json",
+        "hosts.json",
+        "token.json",
+    }
+
+    for candidate in likely_names:
+        path = copilot_config_dir / candidate
+        try:
+            if path.exists() and path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+
+    # Copilot frequently persists session/auth state under session-state.
+    try:
+        session_state = copilot_config_dir / "session-state"
+        if session_state.exists() and session_state.is_dir():
+            for p in session_state.glob("*/events.jsonl"):
+                if p.exists() and p.stat().st_size > 0:
+                    return True
+    except OSError:
+        pass
+
+    # Fallback: any file with "auth" or "token" in the name.
+    try:
+        for p in copilot_config_dir.glob("*.json"):
+            name = p.name.lower()
+            if ("auth" in name or "token" in name or "oauth" in name) and p.stat().st_size > 0:
+                return True
+    except OSError:
+        return False
+
+    return False
+
+
+def _copilot_auth_smoke_test(*, copilot_config_dir: Path, repo_root: Path) -> bool:
+    # As a last resort, run a tiny non-interactive prompt with a very short timeout.
+    # If unauthenticated, Copilot CLI fails fast with a clear error.
+    # If authenticated, it may take time to answer; a timeout is treated as success.
+    copilot_config_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "copilot",
+        "--config-dir",
+        str(copilot_config_dir),
+        "--add-dir",
+        str(repo_root),
+        "--no-color",
+        "--stream",
+        "off",
+        "--silent",
+        "-p",
+        "Reply with exactly: OK",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo_root),
+            env=_copilot_env_for_dir(copilot_config_dir),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=2.0,
+        )
+    except subprocess.TimeoutExpired as e:
+        combined = (e.stdout or "") + (e.stderr or "")
+        if _looks_like_no_auth_error(combined):
+            return False
+        return True
+
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    if _looks_like_no_auth_error(combined):
+        return False
+    if proc.returncode == 0:
+        return True
+    # Unknown failure: assume authenticated to avoid blocking startup.
+    return True
+
+
+def _copilot_is_authenticated(*, copilot_config_dir: Path, repo_root: Path) -> bool:
+    marker = _copilot_auth_marker_path(repo_root)
+    if marker.exists():
+        try:
+            recorded = marker.read_text(encoding="utf-8").strip()
+            if recorded and recorded == str(copilot_config_dir):
+                ok = _copilot_auth_smoke_test(
+                    copilot_config_dir=copilot_config_dir,
+                    repo_root=repo_root,
+                )
+                if ok:
+                    return True
+                # Stale marker: remove so we don't keep selecting a bad config dir.
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    if _has_copilot_token_env():
+        return True
+    if _has_gh_auth(repo_root):
+        return True
+    if _copilot_config_dir_looks_authenticated(copilot_config_dir):
+        return True
+
+    ok = _copilot_auth_smoke_test(copilot_config_dir=copilot_config_dir, repo_root=repo_root)
+    if ok:
+        try:
+            marker.write_text(str(copilot_config_dir) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    return ok
+
+
+def _resolve_copilot_config_dir(repo_root: Path) -> Path:
+    # Prefer any previously selected config dir, but only if it still works.
+    hint_path = _copilot_config_dir_marker_path(repo_root)
+    if hint_path.exists():
+        try:
+            hinted = Path(hint_path.read_text(encoding="utf-8").strip())
+        except OSError:
+            hinted = None
+
+        if hinted is not None and _copilot_is_authenticated(
+            copilot_config_dir=hinted,
+            repo_root=repo_root,
+        ):
+            return hinted
+
+    # Prefer repo-local copilot state if already authenticated there.
+    repo_local = _copilot_shared_dir(repo_root)
+    if _copilot_is_authenticated(copilot_config_dir=repo_local, repo_root=repo_root):
+        return repo_local
+
+    # Otherwise, fall back to the user's default Copilot directory if it's already authenticated.
+    default_dir = _default_copilot_config_dir()
+    if _copilot_is_authenticated(copilot_config_dir=default_dir, repo_root=repo_root):
+        return default_dir
+
+    # If neither is authenticated, we will authenticate into the repo-local dir.
+    return repo_local
+
+
+def _ensure_copilot_authenticated(*, copilot_config_dir: Path, repo_root: Path) -> None:
+    if _copilot_is_authenticated(copilot_config_dir=copilot_config_dir, repo_root=repo_root):
+        return
+
+    print("Copilot CLI is not authenticated; launching login flow...")
+    print("In the Copilot CLI, run '/login' then exit when done.")
+    print(f"Using config dir: {copilot_config_dir}")
+
+    proc = subprocess.run(
+        [
+            "copilot",
+            "--config-dir",
+            str(copilot_config_dir),
+            "--add-dir",
+            str(repo_root),
+        ],
+        cwd=str(repo_root),
+        env=_copilot_env_for_dir(copilot_config_dir),
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise SystemExit("Copilot authentication flow exited with an error")
+
+    # Copilot CLI doesn't currently provide a reliable, fast, non-model way to
+    # verify login state across environments. If the user completed `/login` and
+    # exited cleanly, persist a local marker and proceed.
+    try:
+        _copilot_auth_marker_path(repo_root).write_text(
+            str(copilot_config_dir) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+    return
+
+
+def _start_broker(*, repo_root: Path, copilot_config_dir: Path) -> None:
     socket_path = _broker_socket_path(repo_root)
     pid_path = _broker_pid_path(repo_root)
-    copilot_dir = _copilot_shared_dir(repo_root)
     session_marker = _copilot_session_marker_path(repo_root)
     log_path = _shared_dir(repo_root) / "broker.log"
 
     _shared_dir(repo_root).mkdir(parents=True, exist_ok=True)
-    copilot_dir.mkdir(parents=True, exist_ok=True)
+    copilot_config_dir.mkdir(parents=True, exist_ok=True)
 
     if _is_broker_responsive(socket_path):
-        return
+        info = _broker_info(socket_path)
+        if isinstance(info, dict) and info.get("copilotConfigDir") == str(copilot_config_dir):
+            return
+
+        # Broker is running but pointed at a different config dir; restart it.
+        if pid_path.exists():
+            try:
+                pid = int(pid_path.read_text(encoding="utf-8").strip())
+                import signal
+
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+
+        try:
+            socket_path.unlink()
+        except OSError:
+            pass
 
     # If we have a PID but no responsive socket, try to terminate the stale broker.
     if pid_path.exists():
@@ -88,7 +361,6 @@ def _start_broker(repo_root: Path) -> None:
 
         if pid is not None:
             try:
-                import os
                 import signal
 
                 os.kill(pid, signal.SIGTERM)
@@ -128,7 +400,7 @@ def _start_broker(repo_root: Path) -> None:
                 "--repo-root",
                 str(repo_root),
                 "--copilot-config-dir",
-                str(copilot_dir),
+                str(copilot_config_dir),
                 "--pid-file",
                 str(pid_path),
                 "--session-marker-file",
@@ -291,7 +563,17 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     ensure_tmux_available()
     _ensure_shared_files(shared_dir)
-    _start_broker(repo_root)
+
+    copilot_config_dir = _resolve_copilot_config_dir(repo_root)
+    _ensure_copilot_authenticated(copilot_config_dir=copilot_config_dir, repo_root=repo_root)
+    try:
+        _copilot_config_dir_marker_path(repo_root).write_text(
+            str(copilot_config_dir) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+    _start_broker(repo_root=repo_root, copilot_config_dir=copilot_config_dir)
 
     # If the session already exists, treat `start` as idempotent: attach (default)
     # or no-op when explicitly detached.
@@ -503,6 +785,32 @@ def cmd_stop(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auth(args: argparse.Namespace) -> int:
+    repo_root = _repo_root_from_cwd()
+    shared_dir = _shared_dir(repo_root)
+
+    if shutil.which("copilot") is None:
+        raise SystemExit(
+            "GitHub Copilot CLI ('copilot') is required. Install/authenticate it and retry. "
+            "See README for install and login guidance."
+        )
+
+    shared_dir.mkdir(parents=True, exist_ok=True)
+
+    copilot_config_dir = _resolve_copilot_config_dir(repo_root)
+    _ensure_copilot_authenticated(copilot_config_dir=copilot_config_dir, repo_root=repo_root)
+
+    try:
+        _copilot_config_dir_marker_path(repo_root).write_text(
+            str(copilot_config_dir) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+    print(f"Copilot CLI authenticated. Config dir: {copilot_config_dir}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="copilot-multi")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -537,6 +845,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_stop = sub.add_parser("stop", help="Stop the tmux session")
     p_stop.set_defaults(func=cmd_stop)
+
+    p_auth = sub.add_parser(
+        "auth",
+        help="Authenticate Copilot CLI (runs 'copilot' for /login if needed)",
+    )
+    p_auth.set_defaults(func=cmd_auth)
 
     return parser
 

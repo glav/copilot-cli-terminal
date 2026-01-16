@@ -37,6 +37,13 @@ Hardened the `copilot-multi` Linux-only tmux orchestrator with deterministic pan
 * src/copilot_multi/broker.py - New: shared broker process that serializes prompts and uses shared Copilot CLI state.
 * src/copilot_multi/pane_repl.py - New: per-pane REPL that forwards input to broker and prints output in the originating pane.
 * src/copilot_multi/cli.py - Make `stop` idempotent (no error if tmux session is not running).
+* src/copilot_multi/cli.py - Preflight Copilot authentication; if missing, launch interactive `copilot` for `/login` then proceed.
+* src/copilot_multi/cli.py - Persist an auth marker under `.copilot-multi/` to avoid repeatedly prompting on subsequent `start` runs.
+* src/copilot_multi/cli.py - Add `copilot-multi auth` command to run authentication without launching tmux.
+* src/copilot_multi/cli.py - Auto-trust the repo directory by passing `--add-dir` to Copilot CLI to avoid the folder trust prompt.
+* src/copilot_multi/broker.py - Pass `--add-dir` on broker Copilot invocations to prevent trust prompts during prompts.
+* src/copilot_multi/cli.py - Fix stale auth marker/config-dir selection causing broker to run with an unauthenticated config dir.
+* src/copilot_multi/broker.py - Add broker `info` request so `start` can restart a stale broker using the wrong config dir.
 
 ### Removed
 

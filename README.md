@@ -70,6 +70,10 @@ On first launch of `copilot`, you’ll be prompted to log in using the `/login` 
 
 For non-interactive/auth automation, you can also use a fine-grained PAT with the “Copilot Requests” permission via `GH_TOKEN` or `GITHUB_TOKEN`.
 
+When you run `copilot-multi start`, it will preflight-check whether `copilot` is already authenticated. If not, it will temporarily launch `copilot` so you can run `/login`, then it continues and starts the tmux session.
+
+Note: the first time it launches `copilot` you may also see a folder trust prompt. Choose “Yes, and remember this folder for future sessions” if you want to avoid being asked again.
+
 ### Run
 
 ```bash
@@ -88,6 +92,12 @@ Each tmux pane starts in a lightweight "Copilot router" REPL:
 
 - Anything you type is forwarded to the GitHub Copilot CLI (`copilot`) via a shared local broker, so all panes share one Copilot session/history.
 - To run wrapper commands locally (not via Copilot), prefix them with `copilot-multi`, for example: `copilot-multi status`.
+
+If you want to authenticate Copilot CLI ahead of time (without launching tmux):
+
+```bash
+uv run copilot-multi auth
+```
 
 ### Coordination
 
