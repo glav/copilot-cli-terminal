@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -56,6 +57,39 @@ def _session_path(repo_root: Path) -> Path:
 
 def _history_path(*, repo_root: Path, persona: str) -> Path:
     return repo_root / DEFAULT_SHARED_DIR_NAME / "history" / f"{persona}.txt"
+
+
+def _response_path(*, repo_root: Path, persona: str) -> Path:
+    return repo_root / DEFAULT_SHARED_DIR_NAME / "responses" / f"{persona}.last.txt"
+
+
+def _read_last_response(*, repo_root: Path, persona: str, max_chars: int = 12000) -> str:
+    path = _response_path(repo_root=repo_root, persona=persona)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return f"(no saved response for {persona})"
+
+    text = text.strip()
+    if not text:
+        return f"(no saved response for {persona})"
+
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n\n...(truncated)"
+
+
+def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> str:
+    # Replace {{ctx:pm}} / {{ctx:impl}} / ... with that persona's last response.
+    # Keep {{last:...}} as a backward-compatible alias.
+    def _repl(m: re.Match) -> str:
+        key = m.group(2)
+        if key not in PERSONAS:
+            return m.group(0)
+        blob = _read_last_response(repo_root=repo_root, persona=key)
+        return f"\n\n--- begin {key} last response ---\n{blob}\n--- end {key} last response ---\n\n"
+
+    return re.sub(r"\{\{(ctx|last):([A-Za-z0-9_-]+)\}\}", _repl, text or "")
 
 
 def _setup_readline_history(*, repo_root: Path, persona: str) -> None:
@@ -281,9 +315,10 @@ def _run_followup_after_wait(
         pass
 
     try:
+        expanded = _expand_last_response_placeholders(text=follow_line, repo_root=repo_root)
         resp = _connect_and_send(
             socket_path=socket_path,
-            payload={"kind": "prompt", "prompt": f"[{persona}] {follow_line}"},
+            payload={"kind": "prompt", "prompt": f"[{persona}] {expanded}"},
         )
     except OSError as e:
         print(f"Broker error: {e}", file=sys.stderr)
@@ -328,6 +363,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     print("Shortcuts: copilot-wait/copilot-status/copilot-set-status run locally.")
     print("Shortcuts: '>...' runs 'copilot-multi ...' locally (e.g. >status, >waitfor pm).")
     print("Tip: chain after waits with: >waitfor pm -- <prompt or command>")
+    print("Tip: include another pane's context with: {{ctx:impl}} (pm/impl/review/docs)")
     print("Tip: use Up/Down arrows for history.")
     print("Type 'exit' to close this pane.")
     print()
@@ -446,7 +482,8 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             except OSError:
                 pass
 
-            prompt = f"[{persona}] {line}"
+            expanded_line = _expand_last_response_placeholders(text=line, repo_root=repo_root)
+            prompt = f"[{persona}] {expanded_line}"
             resp = _connect_and_send(
                 socket_path=socket_path,
                 payload={"kind": "prompt", "prompt": prompt},

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import socketserver
@@ -8,6 +9,8 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+from copilot_multi.constants import DEFAULT_SHARED_DIR_NAME, PERSONAS
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,71 @@ class BrokerConfig:
 
 class BrokerError(RuntimeError):
     pass
+
+
+def _response_dir(repo_root: Path) -> Path:
+    return repo_root / DEFAULT_SHARED_DIR_NAME / "responses"
+
+
+def _persona_from_prompt(prompt: str) -> str | None:
+    # We prefix prompts in pane_repl like: "[pm] <text>".
+    m = re.match(r"^\[([A-Za-z0-9_-]+)\]\s+", prompt or "")
+    if not m:
+        return None
+    key = m.group(1)
+    return key if key in PERSONAS else None
+
+
+def _strip_usage_footer(text: str) -> str:
+    """Remove Copilot CLI usage stats footer from output.
+
+    The Copilot CLI often prints a trailing usage block, e.g. "Total usage est".
+    For cross-pane context capture we strip it to keep prompts focused.
+    """
+
+    if not text:
+        return ""
+
+    lines = text.splitlines()
+    cut = None
+
+    # Prefer the canonical marker.
+    for i, line in enumerate(lines):
+        if line.strip().startswith("Total usage est:"):
+            cut = i
+            break
+
+    # Fallback marker.
+    if cut is None:
+        for i, line in enumerate(lines):
+            if line.strip().startswith("Usage by model:"):
+                cut = i
+                break
+
+    if cut is None:
+        return text
+
+    trimmed = "\n".join(lines[:cut]).rstrip()
+    # Preserve trailing newline if present in original.
+    if text.endswith("\n"):
+        return trimmed + "\n"
+    return trimmed
+
+
+def _write_last_response(*, repo_root: Path, persona: str, output: str) -> None:
+    if not persona:
+        return
+    out = _strip_usage_footer(output)
+    if not out.strip():
+        return
+
+    path = _response_dir(repo_root) / f"{persona}.last.txt"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(out, encoding="utf-8")
+    except OSError:
+        # Best-effort only.
+        return
 
 
 def _ensure_dir(path: Path) -> None:
@@ -100,6 +168,12 @@ def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock)
                 cfg.session_marker_file.write_text("started\n", encoding="utf-8")
             except OSError:
                 pass
+
+        # Best-effort: persist the last output per persona so other panes can
+        # include it as context without the usage footer.
+        persona = _persona_from_prompt(prompt)
+        if persona:
+            _write_last_response(repo_root=cfg.repo_root, persona=persona, output=combined)
 
         return proc.returncode, combined
 
