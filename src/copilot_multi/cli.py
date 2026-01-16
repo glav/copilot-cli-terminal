@@ -1,6 +1,10 @@
 import argparse
 import json
 import shutil
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from copilot_multi.constants import (
@@ -29,6 +33,120 @@ from copilot_multi.tmux import (
 )
 
 CURRENT_SESSION_VERSION = 2
+
+
+def _broker_socket_path(repo_root: Path) -> Path:
+    return _shared_dir(repo_root) / "broker.sock"
+
+
+def _broker_pid_path(repo_root: Path) -> Path:
+    return _shared_dir(repo_root) / "broker.pid"
+
+
+def _copilot_shared_dir(repo_root: Path) -> Path:
+    # Keep Copilot CLI state/config local to the repo so panes share it.
+    return _shared_dir(repo_root) / "copilot"
+
+
+def _copilot_session_marker_path(repo_root: Path) -> Path:
+    return _shared_dir(repo_root) / "copilot.session"
+
+
+def _is_broker_responsive(socket_path: Path, timeout_seconds: float = 0.2) -> bool:
+    if not socket_path.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout_seconds)
+            s.connect(str(socket_path))
+            s.sendall(b'{"kind":"ping"}\n')
+            data = s.recv(2048)
+            return b"pong" in data
+    except OSError:
+        return False
+
+
+def _start_broker(repo_root: Path) -> None:
+    socket_path = _broker_socket_path(repo_root)
+    pid_path = _broker_pid_path(repo_root)
+    copilot_dir = _copilot_shared_dir(repo_root)
+    session_marker = _copilot_session_marker_path(repo_root)
+    log_path = _shared_dir(repo_root) / "broker.log"
+
+    _shared_dir(repo_root).mkdir(parents=True, exist_ok=True)
+    copilot_dir.mkdir(parents=True, exist_ok=True)
+
+    if _is_broker_responsive(socket_path):
+        return
+
+    # If we have a PID but no responsive socket, try to terminate the stale broker.
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            pid = None
+
+        if pid is not None:
+            try:
+                import os
+                import signal
+
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(20):
+                    if not pid_path.exists():
+                        break
+                    time.sleep(0.05)
+                # Force-kill if still alive.
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    pass
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+        # Clean up any stale artifacts; the new broker will recreate them.
+        try:
+            pid_path.unlink()
+        except OSError:
+            pass
+        try:
+            socket_path.unlink()
+        except OSError:
+            pass
+
+    # Start the broker as a detached process. It will create the socket + pid file.
+    with log_path.open("a", encoding="utf-8") as log_fp:
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "copilot_multi.broker",
+                "--socket",
+                str(socket_path),
+                "--repo-root",
+                str(repo_root),
+                "--copilot-config-dir",
+                str(copilot_dir),
+                "--pid-file",
+                str(pid_path),
+                "--session-marker-file",
+                str(session_marker),
+            ],
+            cwd=str(repo_root),
+            stdout=log_fp,
+            stderr=log_fp,
+            start_new_session=True,
+        )
+
+    # Wait briefly for broker readiness.
+    for _ in range(30):
+        if _is_broker_responsive(socket_path):
+            return
+        time.sleep(0.1)
+
+    raise SystemExit(f"Broker failed to start (no socket): {socket_path}")
 
 
 def _repo_root_from_cwd() -> Path:
@@ -173,6 +291,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     ensure_tmux_available()
     _ensure_shared_files(shared_dir)
+    _start_broker(repo_root)
 
     # If the session already exists, treat `start` as idempotent: attach (default)
     # or no-op when explicitly detached.
@@ -223,15 +342,17 @@ def cmd_start(args: argparse.Namespace) -> int:
         set_pane_title(target=target, title=display)
         send_keys(target=target, command=f"export COPILOT_MULTI_PERSONA={persona_key}")
         send_keys(target=target, command="cd " + str(repo_root))
+        # Route all input through a per-pane REPL that forwards prompts to a shared broker.
         send_keys(
             target=target,
             command=(
                 "clear; "
                 + f"echo '=== Copilot Multi Persona: {display} ==='; "
-                + "echo 'Shared context lives in: .copilot-multi/'; "
-                + "echo 'Update status: copilot-multi set-status "
-                + "<pm|impl|review|docs> <idle|working|waiting|done|blocked>'; "
-                + "echo 'Run Copilot: copilot';"
+                + "echo 'Starting Copilot router...'; "
+                + "uv run python -m copilot_multi.pane_repl "
+                + f"--persona {persona_key} "
+                + f"--socket {str(_broker_socket_path(repo_root))} "
+                + f"--repo-root {str(repo_root)}"
             ),
         )
 
@@ -326,11 +447,59 @@ def cmd_wait(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(_: argparse.Namespace) -> int:
-    try:
-        kill_session(TMUX_SESSION_NAME)
-        print(f"Stopped tmux session '{TMUX_SESSION_NAME}'.")
-    except TmuxError as e:
-        raise SystemExit(str(e)) from e
+    repo_root = _repo_root_from_cwd()
+
+    # Best-effort: stop broker first (it may outlive the tmux session).
+    pid_path = _broker_pid_path(repo_root)
+    socket_path = _broker_socket_path(repo_root)
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+            import os
+            import signal
+
+            # SIGTERM and wait briefly for cleanup.
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                if not pid_path.exists():
+                    break
+                time.sleep(0.05)
+
+            # If still alive, force kill.
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                pass
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+            # Clean up pid file if it didn't get removed by the broker.
+            if pid_path.exists():
+                try:
+                    pid_path.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    # Clean up broker socket only when it isn't responsive.
+    if socket_path.exists() and not _is_broker_responsive(socket_path):
+        try:
+            socket_path.unlink()
+        except OSError:
+            pass
+
+    if has_session(TMUX_SESSION_NAME):
+        try:
+            kill_session(TMUX_SESSION_NAME)
+            print(f"Stopped tmux session '{TMUX_SESSION_NAME}'.")
+        except TmuxError as e:
+            raise SystemExit(str(e)) from e
+    else:
+        print(f"tmux session '{TMUX_SESSION_NAME}' is not running.")
     return 0
 
 

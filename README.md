@@ -84,6 +84,11 @@ uv run copilot-multi start --detach
 
 This creates/uses `.copilot-multi/` for shared context and a session state file at `.copilot-multi/session.json`.
 
+Each tmux pane starts in a lightweight "Copilot router" REPL:
+
+- Anything you type is forwarded to the GitHub Copilot CLI (`copilot`) via a shared local broker, so all panes share one Copilot session/history.
+- To run wrapper commands locally (not via Copilot), prefix them with `copilot-multi`, for example: `copilot-multi status`.
+
 ### Coordination
 
 ```bash

@@ -33,6 +33,10 @@ Hardened the `copilot-multi` Linux-only tmux orchestrator with deterministic pan
 * src/copilot_multi/cli.py - Focus the Project Manager pane before attaching so PM is active by default.
 * src/copilot_multi/tmux.py - Add `focus_pane()` helper used to select the initial active pane.
 * README.md - Update `start` example to reflect default attach and document `--detach`.
+* src/copilot_multi/cli.py - Start a shared local broker and run a per-pane REPL so typed input routes through Copilot (except `copilot-multi` commands).
+* src/copilot_multi/broker.py - New: shared broker process that serializes prompts and uses shared Copilot CLI state.
+* src/copilot_multi/pane_repl.py - New: per-pane REPL that forwards input to broker and prints output in the originating pane.
+* src/copilot_multi/cli.py - Make `stop` idempotent (no error if tmux session is not running).
 
 ### Removed
 
