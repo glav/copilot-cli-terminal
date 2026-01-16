@@ -99,6 +99,35 @@ If you want to authenticate Copilot CLI ahead of time (without launching tmux):
 uv run copilot-multi auth
 ```
 
+### Pane colors / theme
+
+The pane REPL supports ANSI-colored headers and persona prompts (e.g. `pm>`, `review>`).
+
+Config lookup (lowest → highest precedence):
+
+- `~/.config/copilot-multi/config.toml` (or `$XDG_CONFIG_HOME/copilot-multi/config.toml`)
+- `./copilot-multi.toml`
+- `./.copilot-multi/config.toml`
+- `$COPILOT_MULTI_CONFIG` (explicit path)
+
+Example `copilot-multi.toml`:
+
+```toml
+[ui]
+color = true
+
+[ui.styles]
+header = "bold cyan"
+tips = "dim"
+prompt_delim = "dim white"
+
+[ui.persona_prompt]
+pm = "bold magenta"
+impl = "bold blue"
+review = "bold green"
+docs = "bold yellow"
+```
+
 ### Coordination
 
 ```bash

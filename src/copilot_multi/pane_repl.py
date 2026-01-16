@@ -16,6 +16,19 @@ from copilot_multi.constants import (
     PERSONAS,
 )
 from copilot_multi.session_store import lock_session_file, unlock_session_file, utc_now_iso
+from copilot_multi.ui import Ansi, UiConfig
+
+
+def _print_err(message: str, *, ansi: Ansi | None = None) -> None:
+    text = ansi.error_text(message) if ansi else message
+    print(text, file=sys.stderr)
+
+
+def _print_local(message: str, *, ansi: Ansi | None = None) -> None:
+    if ansi:
+        print(f"{ansi.local_prefix()} {message}")
+    else:
+        print(f"(local) {message}")
 
 
 def _connect_and_send(*, socket_path: Path, payload: dict) -> dict:
@@ -41,7 +54,7 @@ def _run_local_command(command_line: str) -> int:
     try:
         argv = shlex.split(command_line)
     except ValueError as e:
-        print(f"Parse error: {e}", file=sys.stderr)
+        _print_err(f"Parse error: {e}")
         return 2
 
     if not argv:
@@ -92,7 +105,7 @@ def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> str:
     return re.sub(r"\{\{(ctx|last):([A-Za-z0-9_-]+)\}\}", _repl, text or "")
 
 
-def _setup_readline_history(*, repo_root: Path, persona: str) -> None:
+def _setup_readline_history(*, repo_root: Path, persona: str) -> bool:
     """Best-effort shell-like history (up/down arrows) for `input()`.
 
     Works when Python has the `readline` module available (common on Linux).
@@ -101,13 +114,13 @@ def _setup_readline_history(*, repo_root: Path, persona: str) -> None:
     try:
         import readline  # type: ignore
     except Exception:
-        return
+        return False
 
     history_path = _history_path(repo_root=repo_root, persona=persona)
     try:
         history_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
-        return
+        return True
 
     try:
         readline.read_history_file(str(history_path))
@@ -129,6 +142,7 @@ def _setup_readline_history(*, repo_root: Path, persona: str) -> None:
             pass
 
     atexit.register(_save_history)
+    return True
 
 
 def _set_persona_status(*, repo_root: Path, persona: str, status: str) -> None:
@@ -214,7 +228,7 @@ def _translate_gt_shortcut(line: str) -> list[str] | None:
     try:
         argv = shlex.split(tail)
     except ValueError as e:
-        print(f"Parse error: {e}", file=sys.stderr)
+        _print_err(f"Parse error: {e}")
         return []
 
     if not argv:
@@ -258,6 +272,7 @@ def _run_followup_after_wait(
     persona: str,
     socket_path: Path,
     repo_root: Path,
+    ansi: Ansi | None,
 ) -> None:
     """Run a follow-up after a local wait completes.
 
@@ -279,7 +294,7 @@ def _run_followup_after_wait(
             rendered = shlex.join(gt)
         except Exception:
             rendered = " ".join(gt)
-        print(f"(local) {rendered}")
+        _print_local(rendered, ansi=ansi)
         subprocess.run(gt, text=True)
         return
 
@@ -293,7 +308,7 @@ def _run_followup_after_wait(
         try:
             argv = shlex.split(follow_line)
         except ValueError as e:
-            print(f"Parse error: {e}", file=sys.stderr)
+            _print_err(f"Parse error: {e}", ansi=ansi)
             return
 
         translated = _translate_coordination_alias(argv)
@@ -304,7 +319,7 @@ def _run_followup_after_wait(
             rendered = shlex.join(argv)
         except Exception:
             rendered = " ".join(argv)
-        print(f"(local) {rendered}")
+        _print_local(rendered, ansi=ansi)
         subprocess.run(argv, text=True)
         return
 
@@ -321,11 +336,11 @@ def _run_followup_after_wait(
             payload={"kind": "prompt", "prompt": f"[{persona}] {expanded}"},
         )
     except OSError as e:
-        print(f"Broker error: {e}", file=sys.stderr)
-        print(f"Expected socket at: {socket_path}", file=sys.stderr)
+        _print_err(f"Broker error: {e}", ansi=ansi)
+        _print_err(f"Expected socket at: {socket_path}", ansi=ansi)
         return
     except json.JSONDecodeError:
-        print("Broker returned invalid JSON", file=sys.stderr)
+        _print_err("Broker returned invalid JSON", ansi=ansi)
         return
     finally:
         try:
@@ -334,7 +349,7 @@ def _run_followup_after_wait(
             pass
 
     if not resp.get("ok"):
-        print(f"Broker error: {resp.get('error')}", file=sys.stderr)
+        _print_err(f"Broker error: {resp.get('error')}", ansi=ansi)
         return
 
     output = resp.get("output") or ""
@@ -348,11 +363,18 @@ def _run_followup_after_wait(
 def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     os.chdir(repo_root)
 
-    _setup_readline_history(repo_root=repo_root, persona=persona)
+    has_readline = _setup_readline_history(repo_root=repo_root, persona=persona)
+    ui = UiConfig.load(repo_root=repo_root)
+    ansi = Ansi(theme=ui.theme, use_readline_markers=has_readline)
 
-    prompt_prefix = f"{persona}> "
+    prompt_prefix = ansi.prompt(persona)
 
-    print("=== Copilot Multi Persona REPL ===")
+    display_name = PERSONAS.get(persona, persona)
+    print(ansi.header_line(f"=== Copilot Multi Persona: {display_name} ==="))
+    print(ansi.tip_line("Starting Copilot router..."))
+    print(ansi.tip_line("Tmux tip: use Ctrl-b o (or Ctrl-b + arrows) to switch panes"))
+    print(ansi.tip_line("Tmux tip: Ctrl-b q shows pane numbers"))
+    print(ansi.header_line("=== Copilot Multi Persona REPL ==="))
     print(f"Persona: {persona}")
     print(f"Repo: {repo_root}")
     print("Tmux: copilot-multi uses 1 window with 4 panes (not multiple windows).")
@@ -395,7 +417,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                 rendered = shlex.join(argv)
             except Exception:
                 rendered = " ".join(argv)
-            print(f"(local) {rendered}")
+            _print_local(rendered, ansi=ansi)
 
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
@@ -417,6 +439,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                     persona=persona,
                     socket_path=socket_path,
                     repo_root=repo_root,
+                    ansi=ansi,
                 )
                 continue
 
@@ -434,7 +457,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             try:
                 argv = shlex.split(line)
             except ValueError as e:
-                print(f"Parse error: {e}", file=sys.stderr)
+                _print_err(f"Parse error: {e}", ansi=ansi)
                 continue
 
             translated = _translate_coordination_alias(argv)
@@ -447,7 +470,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                 rendered = shlex.join(argv)
             except Exception:
                 rendered = " ".join(argv)
-            print(f"(local) {rendered}")
+            _print_local(rendered, ansi=ansi)
 
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
@@ -469,6 +492,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                     persona=persona,
                     socket_path=socket_path,
                     repo_root=repo_root,
+                    ansi=ansi,
                 )
                 continue
 
@@ -489,11 +513,11 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                 payload={"kind": "prompt", "prompt": prompt},
             )
         except OSError as e:
-            print(f"Broker error: {e}", file=sys.stderr)
-            print(f"Expected socket at: {socket_path}", file=sys.stderr)
+            _print_err(f"Broker error: {e}", ansi=ansi)
+            _print_err(f"Expected socket at: {socket_path}", ansi=ansi)
             continue
         except json.JSONDecodeError:
-            print("Broker returned invalid JSON", file=sys.stderr)
+            _print_err("Broker returned invalid JSON", ansi=ansi)
             continue
         finally:
             try:
@@ -502,7 +526,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                 pass
 
         if not resp.get("ok"):
-            print(f"Broker error: {resp.get('error')}", file=sys.stderr)
+            _print_err(f"Broker error: {resp.get('error')}", ansi=ansi)
             continue
 
         output = resp.get("output") or ""
