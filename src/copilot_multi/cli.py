@@ -631,6 +631,8 @@ def cmd_start(args: argparse.Namespace) -> int:
                 "clear; "
                 + f"echo '=== Copilot Multi Persona: {display} ==='; "
                 + "echo 'Starting Copilot router...'; "
+                + "echo 'Tmux tip: use Ctrl-b o (or Ctrl-b + arrows) to switch panes'; "
+                + "echo 'Tmux tip: Ctrl-b q shows pane numbers'; "
                 + "uv run python -m copilot_multi.pane_repl "
                 + f"--persona {persona_key} "
                 + f"--socket {str(_broker_socket_path(repo_root))} "
