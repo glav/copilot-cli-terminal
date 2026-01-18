@@ -24,10 +24,12 @@ from copilot_multi.session_store import (
 from copilot_multi.tmux import (
     TmuxError,
     attach,
+    configure_session,
     ensure_tmux_available,
     focus_pane,
     has_session,
     kill_session,
+    pipe_pane_to_file,
     send_keys,
     set_pane_title,
     start_2x2_session,
@@ -607,8 +609,27 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     pane_ids = start_2x2_session(session_name=TMUX_SESSION_NAME, cwd=repo_root)
 
+    # Apply user-configurable tmux options (best-effort per-session).
+    configure_session(
+        session_name=TMUX_SESSION_NAME,
+        cwd=repo_root,
+        history_limit=getattr(args, "history_limit", None),
+        mouse=getattr(args, "mouse", None),
+    )
+
     persona_keys = ["pm", "impl", "review", "docs"]
     pane_targets_by_persona = dict(zip(persona_keys, pane_ids, strict=True))
+
+    # Optional: pipe each pane output to a log file so no output is ever lost.
+    log_dir = getattr(args, "log_dir", None)
+    if log_dir:
+        base = Path(log_dir)
+        for persona_key, target in pane_targets_by_persona.items():
+            pipe_pane_to_file(
+                target=target,
+                log_path=base / f"{persona_key}.log",
+                cwd=repo_root,
+            )
 
     locked = lock_session_file(session_path)
     try:
@@ -820,6 +841,26 @@ def build_parser() -> argparse.ArgumentParser:
     # Keep --attach for backward compatibility (it is effectively a no-op now).
     p_start.add_argument("--detach", action="store_true", help="Start but do not attach")
     p_start.add_argument("--attach", action="store_true", help=argparse.SUPPRESS)
+
+    # Scrolling/retention UX.
+    p_start.add_argument(
+        "--history-limit",
+        type=int,
+        default=100000,
+        help="tmux per-pane history limit (lines)",
+    )
+    p_start.add_argument(
+        "--mouse",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable tmux mouse mode (mouse wheel scroll enters copy-mode)",
+    )
+    p_start.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="If set, pipe each pane output to log files in this directory (pm.log, impl.log, ...)",
+    )
     p_start.set_defaults(func=cmd_start)
 
     p_status = sub.add_parser("status", help="Show persona statuses")

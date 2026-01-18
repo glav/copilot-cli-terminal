@@ -1,4 +1,5 @@
 import argparse
+import atexit
 import json
 import os
 import re
@@ -6,9 +7,8 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
-
-import atexit
 
 from copilot_multi.constants import (
     DEFAULT_SESSION_FILE_NAME,
@@ -31,19 +31,44 @@ def _print_local(message: str, *, ansi: Ansi | None = None) -> None:
         print(f"(local) {message}")
 
 
-def _connect_and_send(*, socket_path: Path, payload: dict) -> dict:
+def _spinner(stop_event: threading.Event, text: str = "Waiting for response...") -> None:
+    frames = ["|", "/", "-", "\\"]
+    clear_len = len(text) + 2
+    idx = 0
+    while not stop_event.is_set():
+        frame = frames[idx % len(frames)]
+        sys.stderr.write(f"\r{frame} {text}")
+        sys.stderr.flush()
+        stop_event.wait(0.1)
+        idx += 1
+    sys.stderr.write("\r" + (" " * clear_len) + "\r")
+    sys.stderr.flush()
+
+
+def _connect_and_send(*, socket_path: Path, payload: dict, show_spinner: bool = False) -> dict:
     raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    stop_event: threading.Event | None = None
+    spinner_thread: threading.Thread | None = None
+    if show_spinner and sys.stderr.isatty():
+        stop_event = threading.Event()
+        spinner_thread = threading.Thread(target=_spinner, args=(stop_event,), daemon=True)
+        spinner_thread.start()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.connect(str(socket_path))
-        s.sendall(raw)
-        chunks: list[bytes] = []
-        while True:
-            data = s.recv(65536)
-            if not data:
-                break
-            chunks.append(data)
-            if b"\n" in data:
-                break
+        try:
+            s.connect(str(socket_path))
+            s.sendall(raw)
+            chunks: list[bytes] = []
+            while True:
+                data = s.recv(65536)
+                if not data:
+                    break
+                chunks.append(data)
+                if b"\n" in data:
+                    break
+        finally:
+            if stop_event and spinner_thread:
+                stop_event.set()
+                spinner_thread.join()
 
     joined = b"".join(chunks)
     line = joined.split(b"\n", 1)[0]
@@ -334,6 +359,7 @@ def _run_followup_after_wait(
         resp = _connect_and_send(
             socket_path=socket_path,
             payload={"kind": "prompt", "prompt": f"[{persona}] {expanded}"},
+            show_spinner=True,
         )
     except OSError as e:
         _print_err(f"Broker error: {e}", ansi=ansi)
@@ -511,6 +537,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             resp = _connect_and_send(
                 socket_path=socket_path,
                 payload={"kind": "prompt", "prompt": prompt},
+                show_spinner=True,
             )
         except OSError as e:
             _print_err(f"Broker error: {e}", ansi=ansi)

@@ -80,6 +80,25 @@ Note: the first time it launches `copilot` you may also see a folder trust promp
 uv run copilot-multi start
 ```
 
+### Pane scrollback (no per-pane scrollbars)
+
+tmux panes do **not** support visible vertical scrollbars.
+
+What you *can* do is scroll each pane’s own history buffer:
+
+- Mouse wheel: when mouse mode is enabled (default), scroll the wheel over a pane to enter tmux copy-mode and scroll that pane’s history.
+- Keyboard: `Ctrl+b` then `[` to enter copy-mode, then use arrow keys / PageUp / PageDown. Press `q` to exit.
+
+This project sets a higher tmux `history-limit` by default so you’re less likely to lose output.
+
+If you want “never lose output”, enable logging:
+
+```bash
+uv run copilot-multi start --log-dir .copilot-multi/logs
+```
+
+This writes one file per pane (e.g. `pm.log`, `impl.log`, `review.log`, `docs.log`).
+
 To start the session in the background (no attach):
 
 ```bash
@@ -92,6 +111,7 @@ Each tmux pane starts in a lightweight "Copilot router" REPL:
 
 - Anything you type is forwarded to the GitHub Copilot CLI (`copilot`) via a shared local broker, so all panes share one Copilot session/history.
 - To run wrapper commands locally (not via Copilot), prefix them with `copilot-multi`, for example: `copilot-multi status`.
+- Include another pane's latest response inline with `{{ctx:<persona>}}` (or legacy `{{last:<persona>}}`), where `<persona>` is `pm`, `impl`, `review`, or `docs`.
 
 If you want to authenticate Copilot CLI ahead of time (without launching tmux):
 

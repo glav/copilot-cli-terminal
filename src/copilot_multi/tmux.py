@@ -2,6 +2,12 @@ import subprocess
 from pathlib import Path
 
 
+def _shell_single_quote(value: str) -> str:
+    # Quote a string for safe embedding in a /bin/sh command.
+    # Uses POSIX shell single-quote escaping: ' -> '\''
+    return "'" + (value or "").replace("'", "'\\''") + "'"
+
+
 class TmuxError(RuntimeError):
     pass
 
@@ -108,7 +114,61 @@ def start_2x2_session(*, session_name: str, cwd: Path) -> list[str]:
     if border_format_res.returncode != 0:
         raise TmuxError(border_format_res.stderr.strip() or "Failed to set tmux pane title format")
 
+    # Improve UX inside embedded panes:
+    # - Increase per-pane history so output is less likely to be lost.
+    # - Enable mouse so mouse wheel scroll enters copy-mode for the active pane.
+    #   (tmux does not support visible per-pane scrollbars.)
+    history_res = _run_tmux(
+        ["set-option", "-t", session_name, "history-limit", "100000"],
+        cwd=cwd,
+    )
+    if history_res.returncode != 0:
+        raise TmuxError(history_res.stderr.strip() or "Failed to set tmux history-limit")
+
+    mouse_res = _run_tmux(
+        ["set-option", "-t", session_name, "mouse", "on"],
+        cwd=cwd,
+    )
+    if mouse_res.returncode != 0:
+        raise TmuxError(mouse_res.stderr.strip() or "Failed to enable tmux mouse mode")
+
     return [p0, p1, p2, p3]
+
+
+def configure_session(
+    *,
+    session_name: str,
+    cwd: Path,
+    history_limit: int | None = None,
+    mouse: bool | None = None,
+) -> None:
+    if history_limit is not None:
+        r = _run_tmux(
+            ["set-option", "-t", session_name, "history-limit", str(history_limit)],
+            cwd=cwd,
+        )
+        if r.returncode != 0:
+            raise TmuxError(r.stderr.strip() or "Failed to set tmux history-limit")
+
+    if mouse is not None:
+        r = _run_tmux(
+            ["set-option", "-t", session_name, "mouse", "on" if mouse else "off"],
+            cwd=cwd,
+        )
+        if r.returncode != 0:
+            raise TmuxError(r.stderr.strip() or "Failed to set tmux mouse mode")
+
+
+def pipe_pane_to_file(*, target: str, log_path: Path, cwd: Path | None = None) -> None:
+    # Pipe pane output to a file. This is the most reliable way to ensure output
+    # is never lost, regardless of tmux history limits.
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # tmux runs the pipe command via /bin/sh -c, so we must shell-quote the path.
+    cmd = f"cat >> {_shell_single_quote(str(log_path))}"
+    r = _run_tmux(["pipe-pane", "-o", "-t", target, cmd], cwd=cwd)
+    if r.returncode != 0:
+        raise TmuxError(r.stderr.strip() or "Failed to pipe tmux pane output")
 
 
 def set_pane_title(*, target: str, title: str) -> None:

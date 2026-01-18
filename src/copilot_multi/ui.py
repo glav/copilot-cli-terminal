@@ -7,7 +7,6 @@ from pathlib import Path
 
 from copilot_multi.constants import PERSONAS
 
-
 _SGR_CODES: dict[str, str] = {
     "reset": "0",
     "bold": "1",
@@ -130,7 +129,7 @@ class UiConfig:
     theme: UiTheme
 
     @staticmethod
-    def load(*, repo_root: Path) -> "UiConfig":
+    def load(*, repo_root: Path) -> UiConfig:
         default_theme = UiTheme()
         defaults = {
             "ui": {
