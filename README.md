@@ -1,43 +1,177 @@
-# Template - Python
+# Copilot multi-persona CLI
 
-This repository is a small, intentionally minimal Python template you can use as the starting point for new repos.
+This repository provides a multi-persona terminal workflow for GitHub Copilot CLI using `tmux`.
 
-It’s designed to be a quick workflow to get started while keeping the day-0 developer experience solid (devcontainer support, modern dependency management, and a place for agent instructions).
-
-## What this template includes
-
-- Python 3.12 devcontainer setup
-- `uv` for dependency management (`pyproject.toml` + `uv.lock`)
-- A tiny runnable entrypoint (`src/app.py`) that loads environment variables from `.env` via `python-dotenv`
-- `AGENTS.md` for coding-agent guidance
-
-## Using this repo as a template
-
-Typical workflow:
-
-1. Create a new repository from this template (GitHub: “Use this template”).
-2. Update project metadata in `pyproject.toml` (name/description).
-3. Replace the sample app code under `src/` with your real project.
-4. Update `AGENTS.md` and this README to reflect the new repo’s purpose.
-
-## Setup
-
-This repo uses `uv`.
+## Quick start
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
+uv run copilot-multi start
 ```
 
-## Run
+## Copilot multi-persona CLI (MVP)
+
+This repo includes an MVP terminal tool that launches a 4-persona workflow using `tmux` panes (Linux-only).
+
+This tool orchestrates panes and shared context files; it does not replace the underlying GitHub Copilot CLI.
+
+Not AWS Copilot: this project targets **GitHub Copilot CLI** (the standalone `copilot` command), not the AWS “copilot” CLI.
+
+### Prereqs
+
+- `tmux` installed and available on `PATH`
+- GitHub Copilot CLI (`copilot`) installed and authenticated
+
+Debian/Ubuntu (including many devcontainers):
 
 ```bash
-uv run python src/app.py
+sudo apt-get update
+sudo apt-get install -y tmux
+```
+
+### Install GitHub Copilot CLI
+
+GitHub Copilot CLI is currently distributed via multiple methods (choose one):
+
+- WinGet (Windows)
+- Homebrew (macOS and Linux)
+- npm (all platforms, requires Node.js 22+)
+- Install script (macOS and Linux)
+
+### Authenticate
+
+On first launch of `copilot`, you’ll be prompted to log in using the `/login` slash command.
+
+For non-interactive/auth automation, you can also use a fine-grained PAT with the “Copilot Requests” permission via `GH_TOKEN` or `GITHUB_TOKEN`.
+
+When you run `copilot-multi start`, it will preflight-check whether `copilot` is already authenticated. If not, it will temporarily launch `copilot` so you can run `/login`, then it continues and starts the tmux session.
+
+Note: the first time it launches `copilot` you may also see a folder trust prompt. Choose “Yes, and remember this folder for future sessions” if you want to avoid being asked again.
+
+### Run
+
+```bash
+uv run copilot-multi start
+```
+
+### Pane scrollback (no per-pane scrollbars)
+
+tmux panes do **not** support visible vertical scrollbars.
+
+What you *can* do is scroll each pane’s own history buffer:
+
+- Mouse wheel: when mouse mode is enabled (default), scroll the wheel over a pane to enter tmux copy-mode and scroll that pane’s history.
+- Keyboard: `Ctrl+b` then `[` to enter copy-mode, then use arrow keys / PageUp / PageDown. Press `q` to exit.
+
+This project sets a higher tmux `history-limit` by default so you’re less likely to lose output.
+
+If you want “never lose output”, enable logging:
+
+```bash
+uv run copilot-multi start --log-dir .copilot-multi/logs
+```
+
+This writes one file per pane (e.g. `pm.log`, `impl.log`, `review.log`, `docs.log`).
+
+To start the session in the background (no attach):
+
+```bash
+uv run copilot-multi start --detach
+```
+
+This creates/uses `.copilot-multi/` for shared context and a session state file at `.copilot-multi/session.json`.
+
+### What is `.copilot-multi/` and can I delete it?
+
+`copilot-multi` keeps repo-local *runtime* files in `.copilot-multi/` (and it is gitignored).
+
+Typical contents include:
+
+- Shared working docs for the personas (e.g. `WORK_CONTEXT.md`, `DECISIONS.md`, `HANDOFF.md`)
+- Coordination state for the running session (e.g. `session.json` plus a lock file)
+- Troubleshooting artifacts (e.g. `logs/`, `history/`, `responses/`, `broker.log`)
+- Local Copilot integration/cache files for the current machine
+
+It is safe to clean when you are **not** running an active session:
+
+- Clean everything (will be recreated on next start):
+
+```bash
+rm -rf .copilot-multi
+```
+
+- Or only clean logs/history:
+
+```bash
+rm -rf .copilot-multi/logs .copilot-multi/history .copilot-multi/responses
+```
+
+If you currently have a tmux session running, stop it first:
+
+```bash
+uv run copilot-multi stop
+```
+
+Each tmux pane starts in a lightweight "Copilot router" REPL:
+
+- Anything you type is forwarded to the GitHub Copilot CLI (`copilot`) via a shared local broker, so all panes share one Copilot session/history.
+- To run wrapper commands locally (not via Copilot), prefix them with `copilot-multi`, for example: `copilot-multi status`.
+- Include another pane's latest response inline with `{{ctx:<persona>}}` (or legacy `{{last:<persona>}}`), where `<persona>` is `pm`, `impl`, `review`, or `docs`.
+- Request another persona inline with `{{agent:<persona>}}` or `{{agent.<persona>}}` (runs `copilot-multi ask <persona> --prompt ...` sequentially; mirrors the prompt in that persona pane; uses the text *after* the marker up to the next marker/end; respects `--timeout`/`--poll`). The originating pane receives only the text before the first agent marker.
+
+Example:
+```text
+Tell me a dad joke about unicorns. {{agent:review}} Review the joke from {{ctx:pm}}
+```
+The PM pane receives only the text before the first agent marker; the review pane receives the text after its marker.
+
+If you want to authenticate Copilot CLI ahead of time (without launching tmux):
+
+```bash
+uv run copilot-multi auth
+```
+
+### Pane colors / theme
+
+The pane REPL supports ANSI-colored headers and persona prompts (e.g. `pm>`, `review>`).
+
+Config lookup (lowest → highest precedence):
+
+- `~/.config/copilot-multi/config.toml` (or `$XDG_CONFIG_HOME/copilot-multi/config.toml`)
+- `./copilot-multi.toml`
+- `./.copilot-multi/config.toml`
+- `$COPILOT_MULTI_CONFIG` (explicit path)
+
+Example `copilot-multi.toml`:
+
+```toml
+[ui]
+color = true
+
+[ui.styles]
+header = "bold cyan"
+tips = "dim"
+prompt_delim = "dim white"
+input = "bright_black"
+
+[ui.persona_prompt]
+pm = "bold magenta"
+impl = "bold blue"
+review = "bold green"
+docs = "bold yellow"
+```
+
+### Coordination
+
+```bash
+uv run copilot-multi status
+uv run copilot-multi set-status pm working --message "Drafting scope + acceptance"
+uv run copilot-multi wait impl --status done --timeout 1800
+uv run copilot-multi stop
 ```
 
 ## Linting and formatting
 
-This template includes `ruff`.
+This repo includes `ruff`.
 
 ```bash
 uv sync --group dev
@@ -56,13 +190,13 @@ cp .env-sample .env
 
 ## Copilot / AI Assisted workflow
 
-This template includes an `.agent/` directory containing reusable prompt “commands” and standards you can use with GitHub Copilot (and other coding agents).
+This repo includes an `.agent/` directory containing reusable prompt “commands” and standards you can use with GitHub Copilot (and other coding agents).
 
 - `.agent/commands/`: ready-to-run prompts for common tasks, for example:
 	- `setup/`: repo bootstrap tasks (e.g. creating `AGENTS.md`)
 	- `project/`: planning prompts (e.g. sprint planning)
 	- `docs/`: documentation prompts (e.g. creating ADRs)
-- `.agent/standards/`: templates and standards for consistent artifacts (ADRs, feature specs, task plans)
+- `.agent/standards/`: standards for consistent artifacts (ADRs, feature specs, task plans)
 - `.agent/instructions/`: “apply-to” instructions that guide how agents write certain file types (e.g. Bash and Bicep)
 
-If you base a new repository on this template, treat `.agent/` as a starting library: keep what helps your team, remove what doesn’t, and add org-specific workflows over time.
+Treat `.agent/` as a starting library: keep what helps your team, remove what doesn’t, and add org-specific workflows over time.

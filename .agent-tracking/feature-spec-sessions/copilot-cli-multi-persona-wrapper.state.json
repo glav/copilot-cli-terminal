@@ -1,0 +1,75 @@
+{
+  "specFile": "docs/feature-specs/copilot-cli-multi-persona-wrapper.md",
+  "lastAccessed": "2026-01-15T00:00:00Z",
+  "currentPhase": "requirements-gathering",
+  "questionsAsked": [
+    "underlying-copilot-cli",
+    "launcher-default",
+    "separate-windows-vs-panes",
+    "shared-working-files",
+    "handoff-semantics"
+  ],
+  "answeredQuestions": {
+    "personas": [
+      "Project Manager",
+      "Implementation Engineer",
+      "Code Review Engineer",
+      "Technical Writer / Documentor"
+    ],
+    "core-need": "A CLI wrapper over Copilot CLI that opens 4 persona terminals with shared context and coordination.",
+    "underlying-copilot-cli": "copilot",
+    "launcher-default": "tmux (2x2 panes)",
+    "separate-windows-vs-panes": "Panes are acceptable; OS windows are not required for MVP.",
+    "handoff-semantics": {
+      "allowedStatuses": ["idle", "working", "waiting", "done", "blocked"],
+      "notes": "MVP uses explicit status updates and optional wait-on-persona."
+    },
+    "shared-working-files": [
+      ".copilot-multi/WORK_CONTEXT.md",
+      ".copilot-multi/DECISIONS.md",
+      ".copilot-multi/HANDOFF.md"
+    ],
+    "mvp-platform-support": "Linux only; no OS terminal windows (tmux panes only)."
+  },
+  "referencesProcessed": [
+    {
+      "file": ".agent/commands/sdd/sdd.1-create-feature-spec.prompt.md",
+      "status": "analyzed",
+      "timestamp": "2026-01-15T00:00:00Z",
+      "keyFindings": "Spec must be created in docs/feature-specs with required markdownlint/table markers; maintain a state file; ask refinement questions iteratively.",
+      "integratedSections": [
+        "progress-tracker",
+        "open-questions",
+        "references"
+      ],
+      "conflicts": [],
+      "pendingActions": []
+    },
+    {
+      "file": ".agent/standards/feature-spec-template.md",
+      "status": "analyzed",
+      "timestamp": "2026-01-15T00:00:00Z",
+      "keyFindings": "Required feature-spec template sections and tables.",
+      "integratedSections": [
+        "all"
+      ],
+      "conflicts": [],
+      "pendingActions": []
+    }
+  ],
+  "nextActions": [
+    "Update spec with final session file locations (where session state lives vs shared docs)",
+    "Define MVP command surface (`start/status/persona set-status/wait/stop`)",
+    "Implement tmux launcher and file-locked session state",
+    "Add README usage + troubleshooting"
+  ],
+  "qualityChecks": [
+    "goals-defined",
+    "scope-clarified-partial",
+    "requirements-initial-draft"
+  ],
+  "userPreferences": {
+    "detail-level": "comprehensive",
+    "question-style": "structured"
+  }
+}

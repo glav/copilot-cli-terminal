@@ -2,5 +2,5 @@
 mode: 'agent'
 ---
 ## General Instructions
-- If no AGENT.MD file exists in the repository root, ask the user to run the ```/setup:agents-md-creation``` command to create one before proceeding.
+- If no AGENTS.MD file exists in the repository root, ask the user to run the ```/setup:agents-md-creation``` command to create one before proceeding.
 - Do not proceed until the AGENTS.md file is created.
