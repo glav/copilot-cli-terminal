@@ -14,7 +14,7 @@ This repo includes an MVP terminal tool that launches a 4-persona workflow using
 
 This tool orchestrates panes and shared context files; it does not replace the underlying GitHub Copilot CLI.
 
-Not AWS Copilot: this project targets **GitHub Copilot CLI** (the standalone `copilot` command), not the AWS “copilot” CLI.
+![Screen image](./docs/images/copilot-multi-1.png)
 
 ### Prereqs
 
