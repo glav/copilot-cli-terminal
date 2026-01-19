@@ -1,38 +1,11 @@
-# Template - Python
+# Copilot multi-persona CLI
 
-This repository is a small, intentionally minimal Python template you can use as the starting point for new repos.
+This repository provides a multi-persona terminal workflow for GitHub Copilot CLI using `tmux`.
 
-It’s designed to be a quick workflow to get started while keeping the day-0 developer experience solid (devcontainer support, modern dependency management, and a place for agent instructions).
-
-## What this template includes
-
-- Python 3.12 devcontainer setup
-- `uv` for dependency management (`pyproject.toml` + `uv.lock`)
-- A tiny runnable entrypoint (`src/app.py`) that loads environment variables from `.env` via `python-dotenv`
-- `AGENTS.md` for coding-agent guidance
-
-## Using this repo as a template
-
-Typical workflow:
-
-1. Create a new repository from this template (GitHub: “Use this template”).
-2. Update project metadata in `pyproject.toml` (name/description).
-3. Replace the sample app code under `src/` with your real project.
-4. Update `AGENTS.md` and this README to reflect the new repo’s purpose.
-
-## Setup
-
-This repo uses `uv`.
+## Quick start
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
-```
-
-## Run
-
-```bash
-uv run python src/app.py
+uv run copilot-multi start
 ```
 
 ## Copilot multi-persona CLI (MVP)
@@ -107,6 +80,37 @@ uv run copilot-multi start --detach
 
 This creates/uses `.copilot-multi/` for shared context and a session state file at `.copilot-multi/session.json`.
 
+### What is `.copilot-multi/` and can I delete it?
+
+`copilot-multi` keeps repo-local *runtime* files in `.copilot-multi/` (and it is gitignored).
+
+Typical contents include:
+
+- Shared working docs for the personas (e.g. `WORK_CONTEXT.md`, `DECISIONS.md`, `HANDOFF.md`)
+- Coordination state for the running session (e.g. `session.json` plus a lock file)
+- Troubleshooting artifacts (e.g. `logs/`, `history/`, `responses/`, `broker.log`)
+- Local Copilot integration/cache files for the current machine
+
+It is safe to clean when you are **not** running an active session:
+
+- Clean everything (will be recreated on next start):
+
+```bash
+rm -rf .copilot-multi
+```
+
+- Or only clean logs/history:
+
+```bash
+rm -rf .copilot-multi/logs .copilot-multi/history .copilot-multi/responses
+```
+
+If you currently have a tmux session running, stop it first:
+
+```bash
+uv run copilot-multi stop
+```
+
 Each tmux pane starts in a lightweight "Copilot router" REPL:
 
 - Anything you type is forwarded to the GitHub Copilot CLI (`copilot`) via a shared local broker, so all panes share one Copilot session/history.
@@ -159,7 +163,7 @@ uv run copilot-multi stop
 
 ## Linting and formatting
 
-This template includes `ruff`.
+This repo includes `ruff`.
 
 ```bash
 uv sync --group dev
@@ -178,13 +182,13 @@ cp .env-sample .env
 
 ## Copilot / AI Assisted workflow
 
-This template includes an `.agent/` directory containing reusable prompt “commands” and standards you can use with GitHub Copilot (and other coding agents).
+This repo includes an `.agent/` directory containing reusable prompt “commands” and standards you can use with GitHub Copilot (and other coding agents).
 
 - `.agent/commands/`: ready-to-run prompts for common tasks, for example:
 	- `setup/`: repo bootstrap tasks (e.g. creating `AGENTS.md`)
 	- `project/`: planning prompts (e.g. sprint planning)
 	- `docs/`: documentation prompts (e.g. creating ADRs)
-- `.agent/standards/`: templates and standards for consistent artifacts (ADRs, feature specs, task plans)
+- `.agent/standards/`: standards for consistent artifacts (ADRs, feature specs, task plans)
 - `.agent/instructions/`: “apply-to” instructions that guide how agents write certain file types (e.g. Bash and Bicep)
 
-If you base a new repository on this template, treat `.agent/` as a starting library: keep what helps your team, remove what doesn’t, and add org-specific workflows over time.
+Treat `.agent/` as a starting library: keep what helps your team, remove what doesn’t, and add org-specific workflows over time.
