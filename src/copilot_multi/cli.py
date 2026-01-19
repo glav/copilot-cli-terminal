@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -834,9 +835,6 @@ def cmd_stop(_: argparse.Namespace) -> int:
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text(encoding="utf-8").strip())
-            import os
-            import signal
-
             # SIGTERM and wait briefly for cleanup.
             os.kill(pid, signal.SIGTERM)
             for _ in range(20):
