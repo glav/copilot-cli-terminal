@@ -30,6 +30,10 @@ def _response_dir(repo_root: Path) -> Path:
     return repo_root / DEFAULT_SHARED_DIR_NAME / "responses"
 
 
+def _response_id_path(*, repo_root: Path, persona: str) -> Path:
+    return _response_dir(repo_root) / f"{persona}.last.id"
+
+
 def _persona_from_prompt(prompt: str) -> str | None:
     # We prefix prompts in pane_repl like: "[pm] <text>".
     m = re.match(r"^\[([A-Za-z0-9_-]+)\]\s+", prompt or "")
@@ -75,7 +79,9 @@ def _strip_usage_footer(text: str) -> str:
     return trimmed
 
 
-def _write_last_response(*, repo_root: Path, persona: str, output: str) -> None:
+def _write_last_response(
+    *, repo_root: Path, persona: str, output: str, request_id: str | None = None
+) -> None:
     if not persona:
         return
     out = _strip_usage_footer(output)
@@ -86,6 +92,11 @@ def _write_last_response(*, repo_root: Path, persona: str, output: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(out, encoding="utf-8")
+        if request_id:
+            _response_id_path(repo_root=repo_root, persona=persona).write_text(
+                request_id + "\n",
+                encoding="utf-8",
+            )
     except OSError:
         # Best-effort only.
         return
@@ -103,7 +114,9 @@ def _copilot_env(config_dir: Path) -> dict[str, str]:
     return env
 
 
-def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock) -> tuple[int, str]:
+def _run_copilot_prompt(
+    *, prompt: str, cfg: BrokerConfig, lock: threading.Lock, request_id: str | None = None
+) -> tuple[int, str]:
     # Ensure prompts are serialized so we don't corrupt Copilot state or overlap.
     with lock:
         cmd = [
@@ -175,7 +188,12 @@ def _run_copilot_prompt(*, prompt: str, cfg: BrokerConfig, lock: threading.Lock)
         # include it as context without the usage footer.
         persona = _persona_from_prompt(prompt)
         if persona:
-            _write_last_response(repo_root=cfg.repo_root, persona=persona, output=combined)
+            _write_last_response(
+                repo_root=cfg.repo_root,
+                persona=persona,
+                output=combined,
+                request_id=request_id,
+            )
 
         return proc.returncode, combined
 
@@ -225,10 +243,15 @@ class _UnixJSONLineHandler(socketserver.StreamRequestHandler):
             self._write_json({"ok": False, "error": "empty_prompt"})
             return
 
+        request_id = req.get("requestId")
+        if not isinstance(request_id, str) or not request_id.strip():
+            request_id = None
+
         code, output = _run_copilot_prompt(
             prompt=prompt,
             cfg=self.broker_cfg,
             lock=self.copilot_lock,
+            request_id=request_id,
         )
         self._write_json({"ok": True, "exitCode": code, "output": output})
 

@@ -130,6 +130,64 @@ def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> str:
     return re.sub(r"\{\{(ctx|last):([A-Za-z0-9_-]+)\}\}", _repl, text or "")
 
 
+def _parse_agent_requests(text: str) -> tuple[str, list[tuple[str, str]]]:
+    agent_pattern = re.compile(r"\{\{agent[:\.]([A-Za-z0-9_-]+)\}\}")
+    current = text or ""
+    matches = list(agent_pattern.finditer(current))
+    if not matches:
+        return current.strip(), []
+
+    head = current[: matches[0].start()].strip()
+    requests: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        persona = m.group(1)
+        if persona not in PERSONAS:
+            continue
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(current)
+        segment = current[start:end].strip()
+        if not segment:
+            continue
+        requests.append((persona, segment))
+    return head, requests
+
+
+def _run_agent_requests(
+    *, requests: list[tuple[str, str]], repo_root: Path, timeout: float, poll: float
+) -> None:
+    if os.environ.get("COPILOT_MULTI_AGENT_CALL") == "1":
+        return
+    for persona, segment in requests:
+        prompt_text = _expand_last_response_placeholders(text=segment, repo_root=repo_root).strip()
+        if not prompt_text:
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    "copilot-multi",
+                    "ask",
+                    persona,
+                    "--prompt",
+                    prompt_text,
+                    "--timeout",
+                    str(timeout),
+                    "--poll",
+                    str(poll),
+                ],
+                cwd=str(repo_root),
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "COPILOT_MULTI_AGENT_CALL": "1"},
+            )
+        except OSError:
+            continue
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            if message:
+                _print_err(message)
+
+
 def _setup_readline_history(*, repo_root: Path, persona: str) -> bool:
     """Best-effort shell-like history (up/down arrows) for `input()`.
 
@@ -355,12 +413,15 @@ def _run_followup_after_wait(
         pass
 
     try:
-        expanded = _expand_last_response_placeholders(text=follow_line, repo_root=repo_root)
-        resp = _connect_and_send(
-            socket_path=socket_path,
-            payload={"kind": "prompt", "prompt": f"[{persona}] {expanded}"},
-            show_spinner=True,
-        )
+        head, requests = _parse_agent_requests(follow_line)
+        head = _expand_last_response_placeholders(text=head, repo_root=repo_root)
+        resp = None
+        if head:
+            resp = _connect_and_send(
+                socket_path=socket_path,
+                payload={"kind": "prompt", "prompt": f"[{persona}] {head}"},
+                show_spinner=True,
+            )
     except OSError as e:
         _print_err(f"Broker error: {e}", ansi=ansi)
         _print_err(f"Expected socket at: {socket_path}", ansi=ansi)
@@ -374,16 +435,24 @@ def _run_followup_after_wait(
         except OSError:
             pass
 
-    if not resp.get("ok"):
+    if resp is not None and not resp.get("ok"):
         _print_err(f"Broker error: {resp.get('error')}", ansi=ansi)
         return
 
-    output = resp.get("output") or ""
-    if output:
-        sys.stdout.write(output)
-        if not output.endswith("\n"):
-            sys.stdout.write("\n")
-        sys.stdout.flush()
+    if resp is not None:
+        output = resp.get("output") or ""
+        if output:
+            sys.stdout.write(output)
+            if not output.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    _run_agent_requests(
+        requests=requests,
+        repo_root=repo_root,
+        timeout=120.0,
+        poll=0.5,
+    )
 
 
 def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
@@ -549,13 +618,16 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             except OSError:
                 pass
 
-            expanded_line = _expand_last_response_placeholders(text=line, repo_root=repo_root)
-            prompt = f"[{persona}] {expanded_line}"
-            resp = _connect_and_send(
-                socket_path=socket_path,
-                payload={"kind": "prompt", "prompt": prompt},
-                show_spinner=True,
-            )
+            head, requests = _parse_agent_requests(line)
+            head = _expand_last_response_placeholders(text=head, repo_root=repo_root)
+            resp = None
+            if head:
+                prompt = f"[{persona}] {head}"
+                resp = _connect_and_send(
+                    socket_path=socket_path,
+                    payload={"kind": "prompt", "prompt": prompt},
+                    show_spinner=True,
+                )
         except OSError as e:
             _print_err(f"Broker error: {e}", ansi=ansi)
             _print_err(f"Expected socket at: {socket_path}", ansi=ansi)
@@ -569,17 +641,25 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             except OSError:
                 pass
 
-        if not resp.get("ok"):
+        if resp is not None and not resp.get("ok"):
             _print_err(f"Broker error: {resp.get('error')}", ansi=ansi)
             continue
 
-        output = resp.get("output") or ""
-        # Print exactly what Copilot printed.
-        if output:
-            sys.stdout.write(output)
-            if not output.endswith("\n"):
-                sys.stdout.write("\n")
-            sys.stdout.flush()
+        if resp is not None:
+            output = resp.get("output") or ""
+            # Print exactly what Copilot printed.
+            if output:
+                sys.stdout.write(output)
+                if not output.endswith("\n"):
+                    sys.stdout.write("\n")
+                sys.stdout.flush()
+
+        _run_agent_requests(
+            requests=requests,
+            repo_root=repo_root,
+            timeout=120.0,
+            poll=0.5,
+        )
 
     return 0
 

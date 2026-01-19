@@ -112,6 +112,49 @@ def _broker_info(socket_path: Path, timeout_seconds: float = 0.3) -> dict | None
         return None
 
 
+def _connect_and_send(*, socket_path: Path, payload: dict) -> dict:
+    raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(str(socket_path))
+        s.sendall(raw)
+        chunks: list[bytes] = []
+        while True:
+            data = s.recv(65536)
+            if not data:
+                break
+            chunks.append(data)
+            if b"\n" in data:
+                break
+    joined = b"".join(chunks)
+    line = joined.split(b"\n", 1)[0]
+    return json.loads(line.decode("utf-8"))
+
+
+def _response_path(repo_root: Path, persona: str) -> Path:
+    return _shared_dir(repo_root) / "responses" / f"{persona}.last.txt"
+
+
+def _response_id_path(repo_root: Path, persona: str) -> Path:
+    return _shared_dir(repo_root) / "responses" / f"{persona}.last.id"
+
+
+def _wait_for_response_update(
+    *, path: Path, since_mtime: float | None, timeout_seconds: float | None, poll_seconds: float
+) -> bool:
+    start = time.time()
+    while True:
+        try:
+            if path.exists():
+                mtime = path.stat().st_mtime
+                if since_mtime is None or mtime > since_mtime:
+                    return True
+        except OSError:
+            pass
+        if timeout_seconds is not None and (time.time() - start) >= timeout_seconds:
+            return False
+        time.sleep(poll_seconds)
+
+
 def _has_copilot_token_env() -> bool:
     # Copilot CLI supports these env vars (in precedence order):
     # COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN.
@@ -435,6 +478,39 @@ def _shared_dir(repo_root: Path) -> Path:
 
 def _session_path(repo_root: Path) -> Path:
     return _shared_dir(repo_root) / DEFAULT_SESSION_FILE_NAME
+
+
+def _pane_id_for_persona(repo_root: Path, persona: str) -> str | None:
+    session_path = _session_path(repo_root)
+    locked = lock_session_file(session_path)
+    try:
+        data = _normalize_session_state(repo_root, locked.read_json())
+    finally:
+        unlock_session_file(locked)
+    pane_id = data.get("personas", {}).get(persona, {}).get("paneId")
+    return pane_id if isinstance(pane_id, str) and pane_id else None
+
+
+def _mirror_prompt_to_pane(repo_root: Path, persona: str, prompt: str) -> None:
+    pane_id = _pane_id_for_persona(repo_root, persona)
+    if not pane_id:
+        return
+    try:
+        send_keys(target=pane_id, command=prompt)
+    except TmuxError:
+        return
+
+
+def _set_persona_status(*, repo_root: Path, persona: str, status: str) -> None:
+    session_path = _session_path(repo_root)
+    locked = lock_session_file(session_path)
+    try:
+        data = _normalize_session_state(repo_root, locked.read_json())
+        data["personas"][persona]["status"] = status
+        data["personas"][persona]["updatedAt"] = utc_now_iso()
+        locked.write_json(data)
+    finally:
+        unlock_session_file(locked)
 
 
 def _ensure_shared_files(shared_dir: Path) -> list[Path]:
@@ -832,6 +908,86 @@ def cmd_auth(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    repo_root = _repo_root_from_cwd()
+    shared_dir = _shared_dir(repo_root)
+    session_path = _session_path(repo_root)
+
+    persona = args.persona
+    if persona not in PERSONAS:
+        raise SystemExit(f"Unknown persona '{persona}'. Expected one of: {', '.join(PERSONAS)}")
+
+    if shutil.which("copilot") is None:
+        raise SystemExit(
+            "GitHub Copilot CLI ('copilot') is required. Install/authenticate it and retry. "
+            "See README for install and login guidance."
+        )
+
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    _write_session_state_if_missing(session_path, _init_session_state(repo_root))
+
+    copilot_config_dir = _resolve_copilot_config_dir(repo_root)
+    _ensure_copilot_authenticated(copilot_config_dir=copilot_config_dir, repo_root=repo_root)
+    _start_broker(repo_root=repo_root, copilot_config_dir=copilot_config_dir)
+
+    response_path = _response_path(repo_root, persona)
+    response_id_path = _response_id_path(repo_root, persona)
+    try:
+        before_mtime = response_path.stat().st_mtime
+    except OSError:
+        before_mtime = None
+    try:
+        before_id = response_id_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        before_id = ""
+
+    request_id = utc_now_iso()
+    prompt = f"[{persona}] {args.prompt}"
+    try:
+        _set_persona_status(repo_root=repo_root, persona=persona, status="working")
+    except OSError:
+        pass
+    _mirror_prompt_to_pane(repo_root, persona, args.prompt)
+    resp = _connect_and_send(
+        socket_path=_broker_socket_path(repo_root),
+        payload={"kind": "prompt", "prompt": prompt, "requestId": request_id},
+    )
+    if not resp.get("ok"):
+        raise SystemExit(f"Broker error: {resp.get('error')}")
+
+    ok = _wait_for_response_update(
+        path=response_path,
+        since_mtime=before_mtime,
+        timeout_seconds=args.timeout,
+        poll_seconds=args.poll,
+    )
+    if ok:
+        try:
+            current_id = response_id_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            current_id = ""
+        if current_id != request_id and current_id == before_id:
+            ok = False
+    if not ok:
+        try:
+            _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
+        except OSError:
+            pass
+        raise SystemExit(f"Timed out waiting for {persona} response")
+
+    try:
+        output = response_path.read_text(encoding="utf-8")
+    except OSError:
+        output = ""
+    if output:
+        print(output.rstrip())
+    try:
+        _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
+    except OSError:
+        pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="copilot-multi")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -892,6 +1048,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Authenticate Copilot CLI (runs 'copilot' for /login if needed)",
     )
     p_auth.set_defaults(func=cmd_auth)
+
+    p_ask = sub.add_parser("ask", help="Send a prompt to a persona and wait for the response")
+    p_ask.add_argument("persona", choices=sorted(PERSONAS.keys()))
+    p_ask.add_argument("--prompt", required=True, help="Prompt to send to the persona")
+    p_ask.add_argument("--timeout", type=float, default=120.0, help="Timeout seconds")
+    p_ask.add_argument("--poll", type=float, default=0.5, help="Polling interval seconds")
+    p_ask.set_defaults(func=cmd_ask)
 
     return parser
 

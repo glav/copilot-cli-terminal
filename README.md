@@ -116,6 +116,13 @@ Each tmux pane starts in a lightweight "Copilot router" REPL:
 - Anything you type is forwarded to the GitHub Copilot CLI (`copilot`) via a shared local broker, so all panes share one Copilot session/history.
 - To run wrapper commands locally (not via Copilot), prefix them with `copilot-multi`, for example: `copilot-multi status`.
 - Include another pane's latest response inline with `{{ctx:<persona>}}` (or legacy `{{last:<persona>}}`), where `<persona>` is `pm`, `impl`, `review`, or `docs`.
+- Request another persona inline with `{{agent:<persona>}}` or `{{agent.<persona>}}` (runs `copilot-multi ask <persona> --prompt ...` sequentially; mirrors the prompt in that persona pane; uses the text *after* the marker up to the next marker/end; respects `--timeout`/`--poll`). The originating pane receives only the text before the first agent marker.
+
+Example:
+```text
+Tell me a dad joke about unicorns. {{agent:review}} Review the joke from {{ctx:pm}}
+```
+The PM pane receives only the text before the first agent marker; the review pane receives the text after its marker.
 
 If you want to authenticate Copilot CLI ahead of time (without launching tmux):
 
