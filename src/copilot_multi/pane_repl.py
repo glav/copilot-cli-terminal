@@ -393,7 +393,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     ui = UiConfig.load(repo_root=repo_root)
     ansi = Ansi(theme=ui.theme, use_readline_markers=has_readline)
 
-    prompt_prefix = ansi.prompt(persona)
+    prompt_prefix = ansi.input_prompt(ansi.prompt(persona))
 
     display_name = PERSONAS.get(persona, persona)
     print(ansi.header_line(f"=== Copilot Multi Persona: {display_name} ==="))
@@ -403,22 +403,39 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     print(ansi.header_line("=== Copilot Multi Persona REPL ==="))
     print(f"Persona: {persona}")
     print(f"Repo: {repo_root}")
-    print("Tmux: copilot-multi uses 1 window with 4 panes (not multiple windows).")
-    print("Tmux: switch panes with Ctrl-b o, or Ctrl-b then arrow keys.")
-    print("Tmux: show pane numbers with Ctrl-b q, then press a number.")
-    print("Type anything to send to Copilot CLI.")
-    print("Commands starting with 'copilot-multi ' run locally.")
-    print("Shortcuts: copilot-wait/copilot-status/copilot-set-status run locally.")
-    print("Shortcuts: '>...' runs 'copilot-multi ...' locally (e.g. >status, >waitfor pm).")
-    print("Tip: chain after waits with: >waitfor pm -- <prompt or command>")
-    print("Tip: include another pane's context with: {{ctx:impl}} (pm/impl/review/docs)")
-    print("Tip: use Up/Down arrows for history.")
-    print("Type 'exit' to close this pane.")
+    print(
+        ansi.italic_line(
+            "Tmux: copilot-multi uses 1 window with 4 panes (not multiple windows)."
+        )
+    )
+    print(ansi.italic_line("Tmux: switch panes with Ctrl-b o, or Ctrl-b then arrow keys."))
+    print(ansi.italic_line("Tmux: show pane numbers with Ctrl-b q, then press a number."))
+    print(ansi.italic_line("Type anything to send to Copilot CLI."))
+    print(ansi.italic_line("Commands starting with 'copilot-multi ' run locally."))
+    print(
+        ansi.italic_line("Shortcuts: copilot-wait/copilot-status/copilot-set-status run locally.")
+    )
+    print(
+        ansi.italic_line(
+            "Shortcuts: '>...' runs 'copilot-multi ...' locally (e.g. >status, >waitfor pm)."
+        )
+    )
+    print(ansi.italic_line("Tip: chain after waits with: >waitfor pm -- <prompt or command>"))
+    print(
+        ansi.italic_line(
+            "Tip: include another pane's context with: {{ctx:impl}} (pm/impl/review/docs)"
+        )
+    )
+    print(ansi.italic_line("Tip: use Up/Down arrows for history."))
+    print(ansi.italic_line("Type 'exit' to close this pane."))
     print()
 
     while True:
         try:
             line = input(prompt_prefix)
+            if line and ansi.input_reset():
+                sys.stdout.write(ansi.input_reset())
+                sys.stdout.flush()
         except EOFError:
             return 0
         except KeyboardInterrupt:

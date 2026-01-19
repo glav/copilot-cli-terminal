@@ -11,6 +11,7 @@ _SGR_CODES: dict[str, str] = {
     "reset": "0",
     "bold": "1",
     "dim": "2",
+    "italic": "3",
     "underline": "4",
     "black": "30",
     "red": "31",
@@ -114,6 +115,7 @@ class UiTheme:
     tips: list[str] = field(default_factory=lambda: ["dim"])
     local: list[str] = field(default_factory=lambda: ["dim", "cyan"])
     error: list[str] = field(default_factory=lambda: ["bold", "red"])
+    input: list[str] = field(default_factory=lambda: ["bright_black"])
     persona_prompt: dict[str, list[str]] = field(
         default_factory=lambda: {
             "pm": ["bold", "magenta"],
@@ -137,12 +139,13 @@ class UiConfig:
                 "styles": {
                     "header": "bold cyan",
                     "prompt_delim": "dim white",
-                    "tips": "dim",
-                    "local": "dim cyan",
-                    "error": "bold red",
-                },
-                "persona_prompt": {
-                    "pm": "bold magenta",
+                "tips": "dim",
+                "local": "dim cyan",
+                "error": "bold red",
+                "input": "bright_black",
+            },
+            "persona_prompt": {
+                "pm": "bold magenta",
                     "impl": "bold blue",
                     "review": "bold green",
                     "docs": "bold yellow",
@@ -208,6 +211,7 @@ class UiConfig:
             tips=_split_style(styles.get("tips")) or default_theme.tips,
             local=_split_style(styles.get("local")) or default_theme.local,
             error=_split_style(styles.get("error")) or default_theme.error,
+            input=_split_style(styles.get("input")) or default_theme.input,
             persona_prompt=persona_prompt_styles,
         )
 
@@ -242,6 +246,9 @@ class Ansi:
     def tip_line(self, text: str) -> str:
         return self._style(text, self._theme.tips)
 
+    def italic_line(self, text: str) -> str:
+        return self._style(text, ["italic"])
+
     def local_prefix(self, text: str = "(local)") -> str:
         return self._style(text, self._theme.local)
 
@@ -253,3 +260,19 @@ class Ansi:
         left = self._style(persona, persona_tokens)
         delim = self._style(">", self._theme.prompt_delim)
         return f"{left}{delim} "
+
+    def input_prompt(self, prompt: str) -> str:
+        if not self._theme.color:
+            return prompt
+        start = _sgr_seq(self._theme.input)
+        if not start:
+            return prompt
+        return f"{prompt}{self._wrap_nonprinting(start)}"
+
+    def input_reset(self) -> str:
+        if not self._theme.color:
+            return ""
+        reset = _sgr_seq(["reset"])
+        if not reset:
+            return ""
+        return self._wrap_nonprinting(reset)

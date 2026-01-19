@@ -144,6 +144,7 @@ color = true
 header = "bold cyan"
 tips = "dim"
 prompt_delim = "dim white"
+input = "bright_black"
 
 [ui.persona_prompt]
 pm = "bold magenta"
