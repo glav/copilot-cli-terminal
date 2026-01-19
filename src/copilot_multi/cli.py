@@ -36,7 +36,7 @@ from copilot_multi.tmux import (
     start_2x2_session,
 )
 
-CURRENT_SESSION_VERSION = 2
+CURRENT_SESSION_VERSION = 3
 
 
 def _broker_socket_path(repo_root: Path) -> Path:
@@ -488,9 +488,23 @@ def _pane_id_for_persona(repo_root: Path, persona: str) -> str | None:
     return pane_id if isinstance(pane_id, str) and pane_id else None
 
 
+def _wait_for_persona_input_ready(
+    repo_root: Path, persona: str, timeout: float, poll: float
+) -> bool:
+    session_path = _session_path(repo_root)
+    return wait_for_predicate(
+        session_path=session_path,
+        predicate=lambda data: data.get("personas", {}).get(persona, {}).get("inputReady") is True,
+        timeout_seconds=timeout,
+        poll_interval_seconds=poll,
+    )
+
+
 def _mirror_prompt_to_pane(repo_root: Path, persona: str, prompt: str) -> None:
     pane_id = _pane_id_for_persona(repo_root, persona)
     if not pane_id:
+        return
+    if not _wait_for_persona_input_ready(repo_root, persona, timeout=5.0, poll=0.2):
         return
     try:
         send_keys(target=pane_id, command=prompt)
@@ -562,6 +576,7 @@ def _init_session_state(repo_root: Path) -> dict:
                 "status": "idle",
                 "updatedAt": utc_now_iso(),
                 "message": "",
+                "inputReady": False,
                 "paneId": "",
             }
             for key, display in PERSONAS.items()
@@ -600,11 +615,16 @@ def _normalize_session_state(repo_root: Path, data: dict | None) -> dict:
         if status not in ALLOWED_STATUSES:
             status = "idle"
 
+        input_ready = existing.get("inputReady")
+        if not isinstance(input_ready, bool):
+            input_ready = False
+
         normalized["personas"][key] = {
             "displayName": existing.get("displayName") or display,
             "status": status,
             "updatedAt": existing.get("updatedAt") or utc_now_iso(),
             "message": existing.get("message") or "",
+            "inputReady": input_ready,
             "paneId": existing.get("paneId") or "",
         }
 
@@ -937,11 +957,11 @@ def cmd_ask(args: argparse.Namespace) -> int:
 
     request_id = utc_now_iso()
     prompt = f"[{persona}] {args.prompt}"
+    _mirror_prompt_to_pane(repo_root, persona, args.prompt)
     try:
         _set_persona_status(repo_root=repo_root, persona=persona, status="working")
     except OSError:
         pass
-    _mirror_prompt_to_pane(repo_root, persona, args.prompt)
     resp = _connect_and_send(
         socket_path=_broker_socket_path(repo_root),
         payload={"kind": "prompt", "prompt": prompt, "requestId": request_id},
