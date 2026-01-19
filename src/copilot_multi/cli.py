@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -388,8 +389,6 @@ def _start_broker(*, repo_root: Path, copilot_config_dir: Path) -> None:
         if pid_path.exists():
             try:
                 pid = int(pid_path.read_text(encoding="utf-8").strip())
-                import signal
-
                 os.kill(pid, signal.SIGTERM)
             except Exception:
                 pass
@@ -408,8 +407,6 @@ def _start_broker(*, repo_root: Path, copilot_config_dir: Path) -> None:
 
         if pid is not None:
             try:
-                import signal
-
                 os.kill(pid, signal.SIGTERM)
                 for _ in range(20):
                     if not pid_path.exists():
@@ -834,9 +831,6 @@ def cmd_stop(_: argparse.Namespace) -> int:
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text(encoding="utf-8").strip())
-            import os
-            import signal
-
             # SIGTERM and wait briefly for cleanup.
             os.kill(pid, signal.SIGTERM)
             for _ in range(20):
