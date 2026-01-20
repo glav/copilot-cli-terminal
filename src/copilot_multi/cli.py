@@ -488,6 +488,15 @@ def _pane_id_for_persona(repo_root: Path, persona: str) -> str | None:
     return pane_id if isinstance(pane_id, str) and pane_id else None
 
 
+def _format_prompt_for_mirror(prompt: str, max_len: int = 240) -> str:
+    collapsed = " ".join((prompt or "").split())
+    if not collapsed:
+        return ""
+    if len(collapsed) > max_len:
+        collapsed = collapsed[:max_len].rstrip() + "..."
+    return collapsed
+
+
 def _wait_for_persona_input_ready(
     repo_root: Path, persona: str, timeout: float, poll: float
 ) -> bool:
@@ -504,10 +513,13 @@ def _mirror_prompt_to_pane(repo_root: Path, persona: str, prompt: str) -> None:
     pane_id = _pane_id_for_persona(repo_root, persona)
     if not pane_id:
         return
-    if not _wait_for_persona_input_ready(repo_root, persona, timeout=5.0, poll=0.2):
+    if os.environ.get("COPILOT_MULTI_PERSONA") == persona:
+        return
+    preview = _format_prompt_for_mirror(prompt)
+    if not preview:
         return
     try:
-        send_keys(target=pane_id, command=prompt)
+        send_keys(target=pane_id, command=preview)
     except TmuxError:
         return
 
