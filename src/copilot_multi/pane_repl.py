@@ -387,10 +387,11 @@ def _run_agent_requests(
             before_mtime = last_response_mtime.get(persona)
             before_id = last_response_id.get(persona, "")
             if (
-                current_id
-                and current_id != before_id
-                or current_mtime is not None
-                and current_mtime != before_mtime
+                (current_id and current_id != before_id)
+                or (
+                    current_mtime is not None
+                    and current_mtime != before_mtime
+                )
             ):
                 active_personas.discard(persona)
                 last_response_mtime[persona] = current_mtime
