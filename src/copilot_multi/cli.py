@@ -513,6 +513,7 @@ def _mirror_prompt_to_pane(repo_root: Path, persona: str, prompt: str) -> None:
     pane_id = _pane_id_for_persona(repo_root, persona)
     if not pane_id:
         return
+    # Skip mirroring to origin persona to avoid redundant display
     if os.environ.get("COPILOT_MULTI_PERSONA") == persona:
         return
     preview = _format_prompt_for_mirror(prompt)
