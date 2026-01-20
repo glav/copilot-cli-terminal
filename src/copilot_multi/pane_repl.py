@@ -261,6 +261,13 @@ def _set_persona_input_ready(*, repo_root: Path, persona: str, ready: bool) -> N
         unlock_session_file(locked)
 
 
+def _safe_set_persona_input_ready(*, repo_root: Path, persona: str, ready: bool) -> None:
+    try:
+        _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=ready)
+    except OSError:
+        pass
+
+
 def _translate_coordination_alias(argv: list[str]) -> list[str] | None:
     """Translate friendly coordination aliases to `copilot-multi ...` commands.
 
@@ -519,29 +526,17 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     print()
     while True:
         try:
-            try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
-            except OSError:
-                pass
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
             line = input(prompt_prefix)
-            try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
-            except OSError:
-                pass
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
             if line and ansi.input_reset():
                 sys.stdout.write(ansi.input_reset())
                 sys.stdout.flush()
         except EOFError:
-            try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
-            except OSError:
-                pass
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
             return 0
         except KeyboardInterrupt:
-            try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
-            except OSError:
-                pass
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
             print()
             continue
 
@@ -550,10 +545,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             continue
 
         if line in {"exit", "quit"}:
-            try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
-            except OSError:
-                pass
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
             return 0
 
         gt = _translate_gt_shortcut(line)
@@ -572,7 +564,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
                 try:
-                    _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
+                    _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
                     _set_persona_status(repo_root=repo_root, persona=persona, status="waiting")
                 except OSError:
                     pass
@@ -581,7 +573,9 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                     _ = proc.returncode
                 finally:
                     try:
-                        _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
+                        _safe_set_persona_input_ready(
+                            repo_root=repo_root, persona=persona, ready=True
+                        )
                         _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
                     except OSError:
                         pass
@@ -627,7 +621,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
                 try:
-                    _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
+                    _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
                     _set_persona_status(repo_root=repo_root, persona=persona, status="waiting")
                 except OSError:
                     pass
@@ -636,7 +630,9 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                     _ = proc.returncode
                 finally:
                     try:
-                        _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
+                        _safe_set_persona_input_ready(
+                            repo_root=repo_root, persona=persona, ready=True
+                        )
                         _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
                     except OSError:
                         pass
@@ -656,7 +652,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
 
         try:
             try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
+                _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
                 _set_persona_status(repo_root=repo_root, persona=persona, status="working")
             except OSError:
                 pass
@@ -680,7 +676,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             continue
         finally:
             try:
-                _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
+                _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
                 _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
             except OSError:
                 pass
