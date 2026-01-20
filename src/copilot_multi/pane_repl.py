@@ -157,12 +157,14 @@ def _run_agent_requests(
 ) -> None:
     if os.environ.get("COPILOT_MULTI_AGENT_CALL") == "1":
         return
+    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    env = {**os.environ, "COPILOT_MULTI_AGENT_CALL": "1"}
     for persona, segment in requests:
         prompt_text = _expand_last_response_placeholders(text=segment, repo_root=repo_root).strip()
         if not prompt_text:
             continue
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 [
                     "copilot-multi",
                     "ask",
@@ -176,14 +178,17 @@ def _run_agent_requests(
                 ],
                 cwd=str(repo_root),
                 text=True,
-                capture_output=True,
-                check=False,
-                env={**os.environ, "COPILOT_MULTI_AGENT_CALL": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
             )
         except OSError:
             continue
-        if result.returncode != 0:
-            message = (result.stderr or result.stdout or "").strip()
+        processes.append((persona, proc))
+    for _persona, proc in processes:
+        stdout, stderr = proc.communicate()
+        if proc.returncode != 0:
+            message = (stderr or stdout or "").strip()
             if message:
                 _print_err(message)
 
@@ -240,6 +245,27 @@ def _set_persona_status(*, repo_root: Path, persona: str, status: str) -> None:
         locked.write_json(data)
     finally:
         unlock_session_file(locked)
+
+
+def _set_persona_input_ready(*, repo_root: Path, persona: str, ready: bool) -> None:
+    session_path = _session_path(repo_root)
+    locked = lock_session_file(session_path)
+    try:
+        data = locked.read_json() or {}
+        personas = data.setdefault("personas", {})
+        persona_data = personas.setdefault(persona, {})
+        persona_data["inputReady"] = ready
+        persona_data["updatedAt"] = utc_now_iso()
+        locked.write_json(data)
+    finally:
+        unlock_session_file(locked)
+
+
+def _safe_set_persona_input_ready(*, repo_root: Path, persona: str, ready: bool) -> None:
+    try:
+        _set_persona_input_ready(repo_root=repo_root, persona=persona, ready=ready)
+    except OSError:
+        pass
 
 
 def _translate_coordination_alias(argv: list[str]) -> list[str] | None:
@@ -498,16 +524,19 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
     print(ansi.italic_line("Tip: use Up/Down arrows for history."))
     print(ansi.italic_line("Type 'exit' to close this pane."))
     print()
-
     while True:
         try:
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
             line = input(prompt_prefix)
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
             if line and ansi.input_reset():
                 sys.stdout.write(ansi.input_reset())
                 sys.stdout.flush()
         except EOFError:
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
             return 0
         except KeyboardInterrupt:
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
             print()
             continue
 
@@ -516,6 +545,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             continue
 
         if line in {"exit", "quit"}:
+            _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
             return 0
 
         gt = _translate_gt_shortcut(line)
@@ -534,6 +564,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
                 try:
+                    _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
                     _set_persona_status(repo_root=repo_root, persona=persona, status="waiting")
                 except OSError:
                     pass
@@ -542,6 +573,9 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                     _ = proc.returncode
                 finally:
                     try:
+                        _safe_set_persona_input_ready(
+                            repo_root=repo_root, persona=persona, ready=True
+                        )
                         _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
                     except OSError:
                         pass
@@ -587,6 +621,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             subcmd = argv[1] if len(argv) > 1 else ""
             if subcmd == "wait":
                 try:
+                    _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
                     _set_persona_status(repo_root=repo_root, persona=persona, status="waiting")
                 except OSError:
                     pass
@@ -595,6 +630,9 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
                     _ = proc.returncode
                 finally:
                     try:
+                        _safe_set_persona_input_ready(
+                            repo_root=repo_root, persona=persona, ready=True
+                        )
                         _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
                     except OSError:
                         pass
@@ -614,6 +652,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
 
         try:
             try:
+                _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=False)
                 _set_persona_status(repo_root=repo_root, persona=persona, status="working")
             except OSError:
                 pass
@@ -637,6 +676,7 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             continue
         finally:
             try:
+                _safe_set_persona_input_ready(repo_root=repo_root, persona=persona, ready=True)
                 _set_persona_status(repo_root=repo_root, persona=persona, status="idle")
             except OSError:
                 pass
