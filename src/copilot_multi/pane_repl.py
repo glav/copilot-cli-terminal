@@ -117,9 +117,40 @@ def _read_last_response(*, repo_root: Path, persona: str, max_chars: int = 12000
     return text[:max_chars].rstrip() + "\n\n...(truncated)"
 
 
-def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> str:
+def _parse_marker_matches(*, text: str, marker: str) -> tuple[list[re.Match[str]], str | None]:
+    pattern = re.compile(rf"\{{\{{{re.escape(marker)}[:\.]([A-Za-z0-9_-]+)\}}\}}")
+    current = text or ""
+    matches: list[re.Match[str]] = []
+    cursor = 0
+    start_token = f"{{{{{marker}"
+    while True:
+        idx = current.find(start_token, cursor)
+        if idx == -1:
+            break
+        match = pattern.match(current, idx)
+        if not match:
+            return (
+                [],
+                f"Invalid {marker} marker syntax; expected {{{{{marker}:persona}}}} "
+                f"or {{{{{marker}.persona}}}}.",
+            )
+        persona = match.group(1)
+        if persona not in PERSONAS:
+            return [], f"Unrecognized persona '{persona}' in {marker} marker."
+        matches.append(match)
+        cursor = match.end()
+    return matches, None
+
+
+def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> tuple[str, str | None]:
     # Replace {{ctx:pm}} / {{ctx:impl}} / ... with that persona's last response.
     # Keep {{last:...}} as a backward-compatible alias.
+    current = text or ""
+    for marker in ("ctx", "last"):
+        _, error = _parse_marker_matches(text=current, marker=marker)
+        if error:
+            return current, error
+
     def _repl(m: re.Match) -> str:
         key = m.group(2)
         if key not in PERSONAS:
@@ -127,29 +158,28 @@ def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> str:
         blob = _read_last_response(repo_root=repo_root, persona=key)
         return f"\n\n--- begin {key} last response ---\n{blob}\n--- end {key} last response ---\n\n"
 
-    return re.sub(r"\{\{(ctx|last):([A-Za-z0-9_-]+)\}\}", _repl, text or "")
+    return re.sub(r"\{\{(ctx|last)[:\.]([A-Za-z0-9_-]+)\}\}", _repl, current), None
 
 
-def _parse_agent_requests(text: str) -> tuple[str, list[tuple[str, str]]]:
-    agent_pattern = re.compile(r"\{\{agent[:\.]([A-Za-z0-9_-]+)\}\}")
+def _parse_agent_requests(text: str) -> tuple[str, list[tuple[str, str]], str | None]:
     current = text or ""
-    matches = list(agent_pattern.finditer(current))
+    matches, error = _parse_marker_matches(text=current, marker="agent")
+    if error:
+        return current.strip(), [], error
     if not matches:
-        return current.strip(), []
+        return current.strip(), [], None
 
     head = current[: matches[0].start()].strip()
     requests: list[tuple[str, str]] = []
     for i, m in enumerate(matches):
         persona = m.group(1)
-        if persona not in PERSONAS:
-            continue
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(current)
         segment = current[start:end].strip()
         if not segment:
             continue
         requests.append((persona, segment))
-    return head, requests
+    return head, requests, None
 
 
 def _run_agent_requests(
@@ -160,7 +190,13 @@ def _run_agent_requests(
     processes: list[tuple[str, subprocess.Popen[str]]] = []
     env = {**os.environ, "COPILOT_MULTI_AGENT_CALL": "1"}
     for persona, segment in requests:
-        prompt_text = _expand_last_response_placeholders(text=segment, repo_root=repo_root).strip()
+        prompt_text, ctx_error = _expand_last_response_placeholders(
+            text=segment, repo_root=repo_root
+        )
+        if ctx_error:
+            _print_err(ctx_error)
+            continue
+        prompt_text = prompt_text.strip()
         if not prompt_text:
             continue
         try:
@@ -439,8 +475,14 @@ def _run_followup_after_wait(
         pass
 
     try:
-        head, requests = _parse_agent_requests(follow_line)
-        head = _expand_last_response_placeholders(text=head, repo_root=repo_root)
+        head, requests, parse_error = _parse_agent_requests(follow_line)
+        if parse_error:
+            _print_err(parse_error, ansi=ansi)
+            return
+        head, ctx_error = _expand_last_response_placeholders(text=head, repo_root=repo_root)
+        if ctx_error:
+            _print_err(ctx_error, ansi=ansi)
+            return
         resp = None
         if head:
             resp = _connect_and_send(
@@ -657,8 +699,14 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             except OSError:
                 pass
 
-            head, requests = _parse_agent_requests(line)
-            head = _expand_last_response_placeholders(text=head, repo_root=repo_root)
+            head, requests, parse_error = _parse_agent_requests(line)
+            if parse_error:
+                _print_err(parse_error, ansi=ansi)
+                continue
+            head, ctx_error = _expand_last_response_placeholders(text=head, repo_root=repo_root)
+            if ctx_error:
+                _print_err(ctx_error, ansi=ansi)
+                continue
             resp = None
             if head:
                 prompt = f"[{persona}] {head}"
