@@ -142,6 +142,15 @@ def _parse_marker_matches(*, text: str, marker: str) -> tuple[list[re.Match[str]
     return matches, None
 
 
+def _validate_prompt_personas(*, text: str) -> str | None:
+    current = text or ""
+    for marker in ("agent", "ctx", "last"):
+        _, error = _parse_marker_matches(text=current, marker=marker)
+        if error:
+            return error
+    return None
+
+
 def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> tuple[str, str | None]:
     # Replace {{ctx:pm}} / {{ctx:impl}} / ... with that persona's last response.
     # Keep {{last:...}} as a backward-compatible alias.
@@ -475,6 +484,10 @@ def _run_followup_after_wait(
         pass
 
     try:
+        persona_error = _validate_prompt_personas(text=follow_line)
+        if persona_error:
+            _print_err(persona_error, ansi=ansi)
+            return
         head, requests, parse_error = _parse_agent_requests(follow_line)
         if parse_error:
             _print_err(parse_error, ansi=ansi)
@@ -699,6 +712,10 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             except OSError:
                 pass
 
+            persona_error = _validate_prompt_personas(text=line)
+            if persona_error:
+                _print_err(persona_error, ansi=ansi)
+                continue
             head, requests, parse_error = _parse_agent_requests(line)
             if parse_error:
                 _print_err(parse_error, ansi=ansi)
