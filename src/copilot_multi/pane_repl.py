@@ -408,7 +408,7 @@ def _run_agent_requests(
                 started_any = True
 
         if not started_any and not active_personas:
-            time.sleep(0.05)
+            time.sleep(poll)
 
 
 
