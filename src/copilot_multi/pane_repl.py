@@ -8,6 +8,8 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from copilot_multi.constants import (
@@ -16,7 +18,17 @@ from copilot_multi.constants import (
     PERSONAS,
 )
 from copilot_multi.session_store import lock_session_file, unlock_session_file, utc_now_iso
+from copilot_multi.tmux import TmuxError, send_keys
 from copilot_multi.ui import Ansi, UiConfig
+
+
+@dataclass(frozen=True)
+class _AgentRequest:
+    idx: int
+    persona: str
+    segment: str
+    deps: set[str]
+    deadline: float
 
 
 def _print_err(message: str, *, ansi: Ansi | None = None) -> None:
@@ -97,8 +109,58 @@ def _history_path(*, repo_root: Path, persona: str) -> Path:
     return repo_root / DEFAULT_SHARED_DIR_NAME / "history" / f"{persona}.txt"
 
 
+def _response_id_path(*, repo_root: Path, persona: str) -> Path:
+    return repo_root / DEFAULT_SHARED_DIR_NAME / "responses" / f"{persona}.last.id"
+
+
 def _response_path(*, repo_root: Path, persona: str) -> Path:
     return repo_root / DEFAULT_SHARED_DIR_NAME / "responses" / f"{persona}.last.txt"
+
+
+def _pane_id_for_persona(*, repo_root: Path, persona: str) -> str | None:
+    session_path = _session_path(repo_root)
+    locked = lock_session_file(session_path)
+    try:
+        data = locked.read_json() or {}
+    finally:
+        unlock_session_file(locked)
+    pane_id = data.get("personas", {}).get(persona, {}).get("paneId")
+    return pane_id if isinstance(pane_id, str) and pane_id else None
+
+
+def _wait_for_persona_input_ready(
+    *, repo_root: Path, persona: str, timeout: float, poll: float
+) -> bool:
+    deadline = time.time() + timeout
+    while True:
+        session_path = _session_path(repo_root)
+        locked = lock_session_file(session_path)
+        try:
+            data = locked.read_json() or {}
+        finally:
+            unlock_session_file(locked)
+        ready = data.get("personas", {}).get(persona, {}).get("inputReady") is True
+        if ready:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def _response_id(*, repo_root: Path, persona: str) -> str:
+    path = _response_id_path(repo_root=repo_root, persona=persona)
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _response_mtime(*, repo_root: Path, persona: str) -> float | None:
+    path = _response_path(repo_root=repo_root, persona=persona)
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _read_last_response(*, repo_root: Path, persona: str, max_chars: int = 12000) -> str:
@@ -151,6 +213,20 @@ def _validate_prompt_personas(*, text: str) -> str | None:
     return None
 
 
+def _extract_ctx_dependencies(*, text: str) -> set[str]:
+    current = text or ""
+    deps: set[str] = set()
+    for marker in ("ctx", "last"):
+        matches, error = _parse_marker_matches(text=current, marker=marker)
+        if error:
+            continue
+        for match in matches:
+            persona = match.group(1)
+            if persona in PERSONAS:
+                deps.add(persona)
+    return deps
+
+
 def _expand_last_response_placeholders(*, text: str, repo_root: Path) -> tuple[str, str | None]:
     # Replace {{ctx:pm}} / {{ctx:impl}} / ... with that persona's last response.
     # Keep {{last:...}} as a backward-compatible alias.
@@ -192,50 +268,148 @@ def _parse_agent_requests(text: str) -> tuple[str, list[tuple[str, str]], str | 
 
 
 def _run_agent_requests(
-    *, requests: list[tuple[str, str]], repo_root: Path, timeout: float, poll: float
+    *,
+    requests: list[tuple[str, str]],
+    repo_root: Path,
+    timeout: float,
+    poll: float,
+    origin_persona: str,
+    socket_path: Path,
+    ansi: Ansi,
 ) -> None:
     if os.environ.get("COPILOT_MULTI_AGENT_CALL") == "1":
         return
-    processes: list[tuple[str, subprocess.Popen[str]]] = []
-    env = {**os.environ, "COPILOT_MULTI_AGENT_CALL": "1"}
-    for persona, segment in requests:
-        prompt_text, ctx_error = _expand_last_response_placeholders(
-            text=segment, repo_root=repo_root
-        )
-        if ctx_error:
-            _print_err(ctx_error)
-            continue
-        prompt_text = prompt_text.strip()
-        if not prompt_text:
-            continue
-        try:
-            proc = subprocess.Popen(
-                [
-                    "copilot-multi",
-                    "ask",
-                    persona,
-                    "--prompt",
-                    prompt_text,
-                    "--timeout",
-                    str(timeout),
-                    "--poll",
-                    str(poll),
-                ],
-                cwd=str(repo_root),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
+    if not requests:
+        return
+
+    pending: list[_AgentRequest] = []
+    deadline = time.time() + timeout
+    for idx, (persona, segment) in enumerate(requests):
+        deps = _extract_ctx_dependencies(text=segment)
+        pending.append(
+            _AgentRequest(
+                idx=idx,
+                persona=persona,
+                segment=segment,
+                deps=deps,
+                deadline=deadline,
             )
-        except OSError:
-            continue
-        processes.append((persona, proc))
-    for _persona, proc in processes:
-        stdout, stderr = proc.communicate()
-        if proc.returncode != 0:
-            message = (stderr or stdout or "").strip()
-            if message:
-                _print_err(message)
+        )
+
+    active_personas: set[str] = set()
+    last_response_mtime: dict[str, float | None] = {
+        req.persona: _response_mtime(repo_root=repo_root, persona=req.persona) for req in pending
+    }
+    last_response_id: dict[str, str] = {
+        req.persona: _response_id(repo_root=repo_root, persona=req.persona) for req in pending
+    }
+
+    def _has_blocking_dependency(req: _AgentRequest) -> bool:
+        for other in pending:
+            if other.idx >= req.idx:
+                continue
+            if other.persona == req.persona:
+                return True
+            if other.persona in req.deps:
+                return True
+        for dep in req.deps:
+            if dep in active_personas:
+                return True
+        return False
+
+    def _dispatch_to_pane(req: _AgentRequest) -> bool:
+        pane_id = _pane_id_for_persona(repo_root=repo_root, persona=req.persona)
+        if not pane_id:
+            _print_err(f"No pane found for persona '{req.persona}'")
+            return False
+        if req.persona == origin_persona:
+            try:
+                head = req.segment.strip()
+                head, ctx_error = _expand_last_response_placeholders(
+                    text=head, repo_root=repo_root
+                )
+                if ctx_error:
+                    _print_err(ctx_error, ansi=ansi)
+                    return False
+                if head:
+                    prompt = f"[{origin_persona}] {head}"
+                    resp = _connect_and_send(
+                        socket_path=socket_path,
+                        payload={"kind": "prompt", "prompt": prompt},
+                        show_spinner=True,
+                    )
+                    if not resp.get("ok"):
+                        _print_err(f"Broker error: {resp.get('error')}", ansi=ansi)
+                        return False
+                    output = resp.get("output") or ""
+                    if output:
+                        sys.stdout.write(output)
+                        if not output.endswith("\n"):
+                            sys.stdout.write("\n")
+                        sys.stdout.flush()
+                last_response_mtime[req.persona] = _response_mtime(
+                    repo_root=repo_root, persona=req.persona
+                )
+                last_response_id[req.persona] = _response_id(
+                    repo_root=repo_root, persona=req.persona
+                )
+            except OSError as e:
+                _print_err(f"Broker error: {e}", ansi=ansi)
+                _print_err(f"Expected socket at: {socket_path}", ansi=ansi)
+                return False
+            except json.JSONDecodeError:
+                _print_err("Broker returned invalid JSON", ansi=ansi)
+                return False
+            return True
+        if not _wait_for_persona_input_ready(
+            repo_root=repo_root, persona=req.persona, timeout=timeout, poll=poll
+        ):
+            _print_err(f"Timed out waiting for {req.persona} input ready")
+            return False
+        try:
+            send_keys(target=pane_id, command=req.segment.strip())
+        except TmuxError as e:
+            _print_err(str(e))
+            return False
+        active_personas.add(req.persona)
+        return True
+
+    while pending or active_personas:
+        now = time.time()
+        for req in list(pending):
+            if now >= req.deadline:
+                _print_err(f"Timed out waiting to start {req.persona} request")
+                pending.remove(req)
+
+        for persona in list(active_personas):
+            current_mtime = _response_mtime(repo_root=repo_root, persona=persona)
+            current_id = _response_id(repo_root=repo_root, persona=persona)
+            before_mtime = last_response_mtime.get(persona)
+            before_id = last_response_id.get(persona, "")
+            if (
+                (current_id and current_id != before_id)
+                or (
+                    current_mtime is not None
+                    and current_mtime != before_mtime
+                )
+            ):
+                active_personas.discard(persona)
+                last_response_mtime[persona] = current_mtime
+                last_response_id[persona] = current_id
+
+        started_any = False
+        for req in list(pending):
+            if req.persona in active_personas:
+                continue
+            if _has_blocking_dependency(req):
+                continue
+            pending.remove(req)
+            if _dispatch_to_pane(req):
+                started_any = True
+
+        if not started_any and not active_personas:
+            time.sleep(poll)
+
 
 
 def _setup_readline_history(*, repo_root: Path, persona: str) -> bool:
@@ -533,6 +707,9 @@ def _run_followup_after_wait(
         repo_root=repo_root,
         timeout=120.0,
         poll=0.5,
+        origin_persona=persona,
+        socket_path=socket_path,
+        ansi=ansi,
     )
 
 
@@ -764,6 +941,9 @@ def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
             repo_root=repo_root,
             timeout=120.0,
             poll=0.5,
+            origin_persona=persona,
+            socket_path=socket_path,
+            ansi=ansi,
         )
 
     return 0
