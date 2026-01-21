@@ -14,3 +14,6 @@ output
  git-credential-manager/
 
 .copilot-multi/
+.copilot-persona-dirs/
+.agent-tracking/
+.temp/

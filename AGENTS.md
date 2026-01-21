@@ -104,3 +104,44 @@ No build/deploy pipeline is defined.
 
 - If `.env` isn’t being loaded, verify you are running from the repo root and that `.env` exists.
 - If imports fail, run scripts from the repo root using `python3 src/<script>.py` so `src/` is on `sys.path`.
+
+## Copilot Multi-Persona Workflow
+
+### Per-Persona Custom Instructions
+
+This repository uses copilot-multi with persona-specific custom instructions. Each persona (PM, Impl, Review, Docs) operates within defined role boundaries:
+
+- **PM (Project Manager)**: Located in `.agent/pm-persona.md` - Creates specifications and plans only
+- **Impl (Implementation Engineer)**: Located in `.agent/impl-persona.md` - Implements code and fixes bugs
+- **Review (Code Review Engineer)**: Located in `.agent/review-persona.md` - Reviews code, provides feedback only
+- **Docs (Technical Writer)**: Located in `.agent/docs-persona.md` - Maintains documentation only
+
+When you start copilot-multi, these instructions are automatically loaded via a directory-based mechanism. Each persona runs from its own directory (`.copilot-persona-dirs/{persona}/`) which contains a symlinked `AGENTS.md` file pointing to the persona-specific instructions.
+
+### Using Persona Instructions
+
+**Standard usage** (with persona boundaries):
+```bash
+uv run copilot-multi start
+```
+
+**Disable persona instructions** (all personas behave the same):
+```bash
+uv run copilot-multi start --no-persona-agents
+```
+
+### Customizing Personas
+
+To customize what a persona can do, edit its source file in `.agent/` directory and restart the session:
+
+```bash
+# Edit persona instructions
+nano .agent/pm-persona.md
+
+# Restart session for changes to take effect
+uv run copilot-multi stop
+uv run copilot-multi start
+```
+
+For detailed documentation on persona instructions, troubleshooting, and advanced usage, see:
+**[docs/persona-instructions.md](docs/persona-instructions.md)**

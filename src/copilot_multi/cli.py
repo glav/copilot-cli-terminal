@@ -660,6 +660,36 @@ def _write_session_state_if_missing(session_path: Path, state: dict) -> None:
         unlock_session_file(locked)
 
 
+def _setup_persona_directories(repo_root: Path) -> None:
+    """Setup persona-specific directories with AGENTS.md files for per-persona instructions."""
+    persona_base_dir = repo_root / ".copilot-persona-dirs"
+    agent_source_dir = repo_root / ".agent"
+    
+    if not agent_source_dir.exists():
+        return  # No persona instructions to setup
+    
+    for persona_key in PERSONAS.keys():
+        persona_dir = persona_base_dir / persona_key
+        persona_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Source file: .agent/{persona}-persona.md
+        source_file = agent_source_dir / f"{persona_key}-persona.md"
+        # Destination: .copilot-persona-dirs/{persona}/AGENTS.md
+        dest_file = persona_dir / "AGENTS.md"
+        
+        if source_file.exists():
+            # Try symlink first (keeps files in sync), fallback to copy
+            if dest_file.is_symlink():
+                dest_file.unlink()  # Remove old symlink to recreate
+            
+            if not dest_file.exists():
+                try:
+                    dest_file.symlink_to(source_file.resolve())
+                except (OSError, NotImplementedError):
+                    # Symlinks not supported (Windows) or other OS error, use copy
+                    shutil.copy(source_file, dest_file)
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     repo_root = _repo_root_from_cwd()
     shared_dir = _shared_dir(repo_root)
@@ -684,6 +714,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         pass
 
     _start_broker(repo_root=repo_root, copilot_config_dir=copilot_config_dir)
+    
+    # Setup persona-specific directories with AGENTS.md files (unless disabled)
+    if not getattr(args, "no_persona_agents", False):
+        _setup_persona_directories(repo_root)
 
     # If the session already exists, treat `start` as idempotent: attach (default)
     # or no-op when explicitly detached.
@@ -752,7 +786,10 @@ def cmd_start(args: argparse.Namespace) -> int:
         display = PERSONAS[persona_key]
         set_pane_title(target=target, title=display)
         send_keys(target=target, command=f"export COPILOT_MULTI_PERSONA={persona_key}")
+        
+        # Always start in repo root - the REPL will handle directory setup if needed
         send_keys(target=target, command="cd " + str(repo_root))
+        
         # Route all input through a per-pane REPL that forwards prompts to a shared broker.
         send_keys(
             target=target,
@@ -1024,6 +1061,13 @@ def build_parser() -> argparse.ArgumentParser:
     # Keep --attach for backward compatibility (it is effectively a no-op now).
     p_start.add_argument("--detach", action="store_true", help="Start but do not attach")
     p_start.add_argument("--attach", action="store_true", help=argparse.SUPPRESS)
+    
+    # Persona agent configuration
+    p_start.add_argument(
+        "--no-persona-agents",
+        action="store_true",
+        help="Disable per-persona agent instructions (start copilot without persona-specific AGENTS.md)",
+    )
 
     # Scrolling/retention UX.
     p_start.add_argument(

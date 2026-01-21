@@ -201,3 +201,101 @@ This repo includes an `.agent/` directory containing reusable prompt “commands
 - `.agent/instructions/`: “apply-to” instructions that guide how agents write certain file types (e.g. Bash and Bicep)
 
 Treat `.agent/` as a starting library: keep what helps your team, remove what doesn’t, and add org-specific workflows over time.
+
+**Per-Persona Instructions**: See [docs/persona-instructions.md](docs/persona-instructions.md) for details on persona-specific custom instructions that enforce role boundaries.
+
+
+### Per-Persona Agent Instructions
+
+Each persona in copilot-multi can have custom instructions that define its role, responsibilities, and constraints. These instructions are automatically loaded when you start a session.
+
+#### How It Works
+
+When you run `copilot-multi start`, each persona pane loads persona-specific custom instructions:
+
+- **PM (Project Manager)**: Can only write specifications and plans, cannot modify code
+- **Impl (Implementation Engineer)**: Implements code and fixes bugs
+- **Review (Code Review Engineer)**: Reviews code but cannot modify files
+- **Docs (Technical Writer)**: Maintains documentation only
+
+The instructions are stored in `.agent/{persona}-persona.md` files and are automatically applied to each pane through a directory-based mechanism.
+
+#### Persona Directory Structure
+
+```
+.copilot-persona-dirs/          # Auto-generated, gitignored
+├── pm/
+│   ├── AGENTS.md → ../../.agent/pm-persona.md
+│   └── repo → ../..           # Symlink to repository root
+├── impl/
+│   ├── AGENTS.md → ../../.agent/impl-persona.md
+│   └── repo → ../..
+├── review/
+│   ├── AGENTS.md → ../../.agent/review-persona.md
+│   └── repo → ../..
+└── docs/
+    ├── AGENTS.md → ../../.agent/docs-persona.md
+    └── repo → ../..
+```
+
+Each persona runs copilot from its own directory, automatically loading its persona-specific `AGENTS.md` file.
+
+#### Customizing Persona Instructions
+
+To customize what a persona can do:
+
+1. Edit the source file in `.agent/` directory:
+   - `.agent/pm-persona.md` - Project Manager instructions
+   - `.agent/impl-persona.md` - Implementation Engineer instructions
+   - `.agent/review-persona.md` - Code Review Engineer instructions
+   - `.agent/docs-persona.md` - Documentation Specialist instructions
+
+2. Restart your copilot-multi session:
+   ```bash
+   uv run copilot-multi stop
+   uv run copilot-multi start
+   ```
+
+Changes take effect immediately because `.copilot-persona-dirs/*/AGENTS.md` files are symlinked to the source files.
+
+#### Disabling Persona Instructions
+
+If you want to run copilot-multi without persona-specific instructions (all personas behave the same):
+
+```bash
+uv run copilot-multi start --no-persona-agents
+```
+
+This starts copilot in standard mode from the repository root, loading only the repository-level `AGENTS.md` if it exists.
+
+#### Accessing Repository Files from Personas
+
+When working from a persona directory, you can access repository files using:
+
+- **Relative paths**: `../../src/app.py` (two directories up)
+- **Repo symlink**: `repo/src/app.py` (convenient shortcut)
+- **Absolute paths**: Still work as expected
+
+The pane REPL handles path resolution automatically, so most file operations "just work" regardless of which directory you're in.
+
+#### Troubleshooting Persona Instructions
+
+**Persona instructions not loading?**
+1. Verify `.agent/{persona}-persona.md` files exist
+2. Check that `.copilot-persona-dirs/` was created: `ls -la .copilot-persona-dirs/`
+3. Verify symlinks: `ls -la .copilot-persona-dirs/pm/`
+4. Restart your session: `uv run copilot-multi stop && uv run copilot-multi start`
+
+**Can't access repository files?**
+- Use the `repo/` symlink: `view repo/src/app.py`
+- Or relative paths: `view ../../src/app.py`
+- Check if `repo` symlink exists: `ls -la .copilot-persona-dirs/pm/repo`
+
+**Want to verify which instructions are loaded?**
+From any pane, ask: "What are your instructions? What can you do?"
+
+**Persona boundaries not being enforced?**
+1. Check that persona instructions are clear and explicit
+2. Verify you're not using `--no-persona-agents` flag
+3. Review `.agent/{persona}-persona.md` for clarity
+4. Test with a simple prompt like: "Can you edit code files?"

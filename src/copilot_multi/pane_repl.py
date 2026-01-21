@@ -714,11 +714,19 @@ def _run_followup_after_wait(
 
 
 def repl(*, persona: str, socket_path: Path, repo_root: Path) -> int:
+    # Ensure we're in repo root for readline history and other file operations
     os.chdir(repo_root)
 
     has_readline = _setup_readline_history(repo_root=repo_root, persona=persona)
     ui = UiConfig.load(repo_root=repo_root)
     ansi = Ansi(theme=ui.theme, use_readline_markers=has_readline)
+    
+    # After readline is setup, optionally switch to persona directory if it exists
+    # This allows per-persona AGENTS.md to be loaded by Copilot while keeping
+    # readline history and other functionality working correctly
+    persona_dir = repo_root / ".copilot-persona-dirs" / persona
+    if persona_dir.exists() and persona_dir.is_dir():
+        os.chdir(persona_dir)
 
     prompt_prefix = ansi.input_prompt(ansi.prompt(persona))
 
