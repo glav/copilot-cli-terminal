@@ -19,10 +19,10 @@ This tool orchestrates panes and shared context files; it does not replace the u
 
 ### Prereqs
 
-- `tmux` installed and available on `PATH`
-- GitHub Copilot CLI (`copilot`) installed and authenticated
+- `tmux` installed and available on `PATH` (automatically installed if using the devcontainer)
+- GitHub Copilot CLI (`copilot`) installed and authenticated (automatically installed if using the devcontainer)
 
-Debian/Ubuntu (including many devcontainers):
+If not using the devcontainer, install manually on Debian/Ubuntu:
 
 ```bash
 sudo apt-get update
